@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT inbound_type FROM inbound_voucher WHERE voucher_no = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "inbound_type",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "e443541ed97e2d2193bcc1962a1b73ef1ee77a499fa0fc8a7008878458e85f4e"
+}

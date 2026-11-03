@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT shdon FROM hddt_purchase_invoice WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "shdon",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "268f21915cc0637e782fa9bb12adea80cb2993b36b07edc87a5efe74b5a254e8"
+}

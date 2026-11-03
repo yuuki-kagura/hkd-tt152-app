@@ -420,6 +420,10 @@ async function onSyncImport(ids?: number[]) {
     const res = await api.hddtSyncImport({ ids: ids ?? [] });
     const bad = res.results.filter((r) => !r.ok);
     const xmlNote = xmlFillText(res.xml);
+    // Phiếu GIẢM sinh ra khi nhập hóa đơn thay thế là số phiếu người dùng phải
+    // đi kiểm tra sổ, nên phải hiện ngay trên toast — nó không nằm ở cột nào.
+    const giam = res.results.map((r) => r.reversal_voucher_no).filter(Boolean);
+    const giamNote = giam.length ? ` Đã tạo phiếu giảm ${giam.join(", ")} đảo phiếu gốc.` : "";
     if (res.imported > 0) {
       toast.add({
         severity: "success",
@@ -427,7 +431,9 @@ async function onSyncImport(ids?: number[]) {
         detail:
           (bad.length
             ? `${res.failed} hóa đơn lỗi: ${bad[0].message}`
-            : "Tất cả hóa đơn đã được liên kết với phiếu nhập.") + xmlNote,
+            : "Tất cả hóa đơn đã được liên kết với phiếu nhập.") +
+          giamNote +
+          xmlNote,
       });
     } else if (res.failed > 0) {
       toastError("Không tạo được phiếu nhập", bad[0]?.message ?? "Không rõ nguyên nhân");
@@ -520,12 +526,63 @@ function onRescanDay() {
   });
 }
 
-function syncStatusSeverity(s: string) {
-  return s === "imported" ? "success" : s === "manual" ? "warn" : "info";
+function syncStatusSeverity(row: HddtSyncRow) {
+  if (row.status === "imported") return "success";
+  if (row.status === "manual") return "warn";
+  if (row.status === "superseded") return "secondary";
+  return "info";
 }
 
-function syncStatusLabel(s: string) {
-  return s === "imported" ? "Đã nhập kho" : s === "manual" ? "Cần xử lý" : "Chờ nhập kho";
+/**
+ * Nhãn trạng thái. `superseded` cần `tthai` để nói đúng bản bị gì — gộp chung với
+ * "Cần xử lý" là nguồn của đường cụt cũ: bản đã bị thay thế thì không có việc gì
+ * phải làm, còn bản thay thế thì phải nhập được.
+ */
+function syncStatusLabel(row: HddtSyncRow) {
+  switch (row.status) {
+    case "imported":
+      return "Đã nhập kho";
+    case "manual":
+      return "Cần xử lý";
+    case "superseded":
+      if (row.tthai === 6) return "Đã bị hủy";
+      return row.tthai === 5 ? "Đã bị điều chỉnh" : "Đã bị thay thế";
+    default:
+      return "Chờ nhập kho";
+  }
+}
+
+/**
+ * Dòng nhập kho được: hóa đơn mới, hoặc hóa đơn thay thế/điều chỉnh — hai loại
+ * sau kế toán bấm từng dòng (không vào nút hàng loạt) vì bản thay thế có thể kéo
+ * theo phiếu giảm của bản gốc. Bản đã bị thay thế/điều chỉnh/hủy không bao giờ vào kho.
+ */
+function canImportRow(row: HddtSyncRow) {
+  return (
+    row.status === "pending" || (row.status === "manual" && (row.tthai === 2 || row.tthai === 3))
+  );
+}
+
+/** Bấm "Nhập kho" một dòng: có phiếu gốc đã nhập thì hỏi trước vì sẽ sinh 2 phiếu. */
+function onSyncImportRow(row: HddtSyncRow) {
+  if (!row.goc_voucher_no) {
+    void onSyncImport([row.id]);
+    return;
+  }
+  confirm.require({
+    header: "Nhập hóa đơn thay thế",
+    message:
+      `Hóa đơn ${row.khhdon} ${row.shdon} thay thế hóa đơn gốc ${row.goc_hd} — bản gốc đã có ` +
+      `phiếu nhập ${row.goc_voucher_no}. Bấm tiếp để app tạo phiếu GIẢM đảo đúng các dòng của ` +
+      `${row.goc_voucher_no} (trừ tồn kho theo FIFO, ghi Nợ 331 / Có 152) rồi tạo phiếu nhập ` +
+      "mới, cả hai trong một lần ghi sổ. Nếu hàng gốc đã bán hoặc điều chỉnh hết thì tồn kho " +
+      "không đủ và toàn bộ sẽ không được ghi.",
+    icon: "pi pi-exclamation-triangle",
+    acceptLabel: "Tạo phiếu giảm + phiếu nhập",
+    rejectLabel: "Huỷ",
+    acceptProps: { severity: "danger" },
+    accept: () => onSyncImport([row.id]),
+  });
 }
 
 function syncKindLabel(k: string) {
@@ -820,8 +877,11 @@ void (async () => {
         </span>
         <span v-else-if="syncSummary" class="text-gray-500">
           Có {{ syncSummary.total }} hóa đơn trong cache · chờ nhập {{ syncSummary.pending }} · đã
-          nhập {{ syncSummary.imported }} · cần xử lý {{ syncSummary.manual }} · sẽ tạo mới
-          {{ syncSummary.new_products }} mặt hàng
+          nhập {{ syncSummary.imported }} · cần xử lý {{ syncSummary.manual }}
+          <template v-if="syncSummary.superseded">
+            · đã bị thay thế/điều chỉnh {{ syncSummary.superseded }}</template
+          >
+          · sẽ tạo mới {{ syncSummary.new_products }} mặt hàng
         </span>
         <span v-else class="text-gray-400">
           Bấm "Quét cổng" để lấy hóa đơn mua về. Xem trước trước khi nhập kho.
@@ -847,7 +907,7 @@ void (async () => {
         <Column header="Loại" :style="{ width: '8rem' }">
           <template #body="{ data }">{{ syncKindLabel(data.portal_kind) }}</template>
         </Column>
-        <Column header="Số HĐ" :style="{ width: '9rem' }">
+        <Column header="Số HĐ" :style="{ width: '12rem' }">
           <template #body="{ data }">
             <span class="inline-flex items-center gap-1">
               {{ data.khhdon }} {{ data.shdon }}
@@ -863,6 +923,12 @@ void (async () => {
                 @click="openInvoicePdf(data)"
               />
             </span>
+            <!-- Hóa đơn gốc: thiếu dòng này không biết bản thay thế/điều chỉnh
+                 phủ lên hóa đơn nào, và liệu hóa đơn đó đã vào kho chưa. -->
+            <div v-if="data.goc_hd" class="text-xs leading-4 text-gray-500">
+              {{ data.tthai === 3 ? "điều chỉnh" : "thay thế" }} {{ data.goc_hd }}
+              <template v-if="data.goc_voucher_no">· đã nhập {{ data.goc_voucher_no }}</template>
+            </div>
           </template>
         </Column>
         <Column header="Người bán">
@@ -916,8 +982,8 @@ void (async () => {
         <Column header="Trạng thái" :frozen="true" align-frozen="right" :style="{ width: '9rem' }">
           <template #body="{ data }">
             <Tag
-              :value="syncStatusLabel(data.status)"
-              :severity="syncStatusSeverity(data.status)"
+              :value="syncStatusLabel(data)"
+              :severity="syncStatusSeverity(data)"
               :title="data.skip_reason || data.detail_error"
             />
           </template>
@@ -941,15 +1007,15 @@ void (async () => {
           header=""
           :frozen="true"
           align-frozen="right"
-          :style="{ width: '7rem' }"
+          :style="{ width: '10rem' }"
         >
           <template #body="{ data }">
             <Button
-              v-if="data.status === 'pending'"
-              label="Nhập kho"
+              v-if="canImportRow(data)"
+              :label="data.goc_voucher_no ? 'Nhập + phiếu giảm' : 'Nhập kho'"
               size="small"
               severity="secondary"
-              @click="onSyncImport([data.id])"
+              @click="onSyncImportRow(data)"
             />
           </template>
         </Column>

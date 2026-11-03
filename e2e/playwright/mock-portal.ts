@@ -167,6 +167,11 @@ const server = createServer(async (req, res) => {
     return res.end(XML_ZIP);
   }
   if (path.endsWith("/invoices/sold") || path.endsWith("/invoices/purchase")) {
+    // MỘT dòng `tthai: 1` cho cả hai chiều. Tự đồng bộ chạy nền khi mở app sẽ
+    // cache đúng những dòng này vào DB dùng chung, nên thêm dòng tthai 2/4 ở đây
+    // là các test ĐẾM dòng (chờ nhập / cần xử lý / đã nhập) đỏ không đều.
+    // Trạng thái thay thế / đã bị thay thế test qua `hddt_sync_test_seed` — seed
+    // thẳng vào cache, không dính lượt quét nền.
     return json(res, 200, { datas: [LIST_ROW], state: "", total: 1, time: 12 });
   }
   return json(res, 404, { message: "not found" });

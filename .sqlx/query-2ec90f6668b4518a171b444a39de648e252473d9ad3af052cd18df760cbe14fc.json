@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT invoice_serial FROM inbound_voucher WHERE voucher_no = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "invoice_serial",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "2ec90f6668b4518a171b444a39de648e252473d9ad3af052cd18df760cbe14fc"
+}

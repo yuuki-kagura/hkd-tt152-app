@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COALESCE(SUM(quantity), 0.0) as \"q!: f64\" FROM stock_lot\n                WHERE inbound_voucher_id = (SELECT id FROM inbound_voucher WHERE voucher_no = ?)",
+  "describe": {
+    "columns": [
+      {
+        "name": "q!: f64",
+        "ordinal": 0,
+        "type_info": "Float"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "ba401f0235671352cedd103921efa04928c08fd97dd4513a8c85f34bb4d9c61d"
+}

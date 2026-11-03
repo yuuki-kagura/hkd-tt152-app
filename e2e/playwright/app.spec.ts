@@ -3242,6 +3242,13 @@ test("Đồng bộ HĐ mua: Quét cổng có nhật ký realtime từng trang, c
     await sidebarButton(page, "Đồng bộ HĐĐT").click();
     await expect(page.locator("header h2")).toHaveText("Đồng bộ hóa đơn mua");
 
+    // Xóa cache ngày test TRƯỚC khi bấm. `pauseAutoSync` chỉ tắt cờ, không chặn
+    // được lượt tự quét đã khởi động từ lúc mở app — lượt đó cache sẵn ngày
+    // 01/09 của mock, nên quét tay chỉ còn "0 ngày cần quét · 1 ngày đã có cache"
+    // và dòng "Danh sách HĐ điện tử..." không bao giờ xuất hiện. finally của test
+    // này đã dọn ngày đó theo cách y hệt.
+    await request.post("/api/hddt_uncache_day", { data: { day: "2026-09-01" } });
+
     // Chỉ quét đúng ngày mock có hóa đơn: test nhanh mà vẫn đi qua đủ 3 chặng
     // (danh sách → chi tiết từng hóa đơn → lưu XML).
     for (const label of ["Từ ngày lập", "Đến ngày lập"]) {
@@ -7047,4 +7054,230 @@ test("Hồ sơ HKD: chặn trùng tên + hỏi chọn hồ sơ khi máy có nhi�
   await page.goto("/");
   await expect(page.getByTestId("login-username")).toBeVisible({ timeout: 30_000 });
   await expect(page.getByText("Chọn hồ sơ để tiếp tục")).toBeHidden();
+});
+
+// ─── Đồng bộ HĐĐT: hóa đơn thay thế / đã bị thay thế ───
+//
+// Hai trạng thái này từng là đường cụt: bản "đã bị thay thế" bị đếm chung vào
+// "Cần xử lý" dù chẳng có việc gì phải làm, còn bản "thay thế" — bản THỰC SỰ
+// phải nhập — thì không có nút nào. Test để cuối file vì nó để lại phiếu nhập
+// trong DB, còn các test phía trên đếm số dòng theo trạng thái.
+
+/** Dòng hàng chung cho các hóa đơn giả lập của hai test dưới. */
+const TT_DONG = {
+  ten: "Bình NN thay thế E2E",
+  dvtinh: "Cái",
+  mhhdvu: "tt-e2e",
+  sluong: 1,
+  dgia: 200000,
+  stckhau: 0,
+  tsuat: 0.08,
+};
+
+/**
+ * Mặt hàng RIÊNG cho test đảo phiếu gốc.
+ *
+ * Mặt hàng khớp theo "tên + đơn vị tính", còn phiếu giảm trừ tồn theo FIFO
+ * (lô nhận sớm nhất), không theo hóa đơn. Test trước để lại lô cùng tên trong
+ * DB dùng chung → phiếu giảm ăn nhầm lô đó. Tên khác đi là lô của test này
+ * đứng một mình, phép thử mới đo đúng điều nó khẳng định.
+ */
+const TT_DONG_GIAM = { ...TT_DONG, ten: "Bình NN đảo phiếu E2E", mhhdvu: "tt-e2e-giam" };
+
+/** Seed 1 hóa đơn mua đã cache, trả về SỐ hóa đơn vừa gán (ký hiệu cố định C26E2E). */
+async function seedHddtInvoice(
+  request: APIRequestContext,
+  portalId: string,
+  extra: Record<string, unknown>,
+  lines: unknown[] = [TT_DONG],
+): Promise<string> {
+  const res = await request.post("/api/hddt_sync_test_seed", {
+    data: { portal_id: portalId, detail: { hdhhdvu: lines, ...extra } },
+  });
+  expect(res.ok(), `seed ${portalId} thất bại ${res.status()}: ${await res.text()}`).toBe(true);
+  return ((await res.json()) as { shdon: string }).shdon;
+}
+
+/** Một dòng preview của hóa đơn `portalId` — cần `id` để nhập đúng 1 dòng. */
+async function previewRowByPortalId(
+  request: APIRequestContext,
+  portalId: string,
+): Promise<Record<string, unknown>> {
+  const res = await (
+    await request.post("/api/hddt_sync_preview", {
+      data: { from: null, to: null, retry_failed: false },
+    })
+  ).json();
+  const rows = (res as { rows: Array<Record<string, unknown>> }).rows;
+  const row = rows.find((r) => r.portal_id === portalId);
+  expect(row, `preview không có hóa đơn ${portalId}`).toBeTruthy();
+  return row as Record<string, unknown>;
+}
+
+/**
+ * Nạp lại màn Đồng bộ HĐĐT sau khi seed qua API.
+ *
+ * Không dùng `page.reload()`: bản web phục vụ từ app chỉ có index.html, reload
+ * là quay về route mặc định "Tổng quan". Cũng không bấm lại tab đang mở —
+ * Vue Router bỏ qua push trùng route nên view không mount lại, bảng vẫn giữ
+ * dữ liệu cũ. Vì vậy phải đi qua một tab khác rồi quay lại.
+ */
+async function reopenHddtSync(page: Page) {
+  await openTab(page, "Tổng quan", "/");
+  await openTab(page, "Đồng bộ HĐĐT", "/hddt-sync");
+  await expect(page.locator("header h2")).toHaveText("Đồng bộ hóa đơn mua");
+  await expect(page.getByText(/Có \d+ hóa đơn trong cache/)).toBeVisible({ timeout: 15_000 });
+}
+
+test("Đồng bộ HĐĐT: tách bản đã bị thay thế khỏi Cần xử lý, mở nút Nhập kho cho bản thay thế", async ({
+  page,
+  request,
+}) => {
+  await pauseAutoSync(request);
+  await ensureLoggedIn(page);
+
+  // Gốc chưa nhập kho → bản thay thế KHÔNG có gì để đảo, chỉ cần nhập bình thường.
+  const soGoc = await seedHddtInvoice(request, "e2e-uuid-tt-a-goc", {});
+  const soBiThayThe = await seedHddtInvoice(request, "e2e-uuid-tt-a-bi", { tthai: 4 });
+  await seedHddtInvoice(request, "e2e-uuid-tt-a-new", {
+    tthai: 2,
+    khhdgoc: "C26E2E",
+    shdgoc: soGoc,
+  });
+
+  await reopenHddtSync(page);
+  const table = page.locator(".p-datatable").last();
+  await expect(table).toBeVisible();
+  // Định danh dòng theo nút PDF (aria-label mang ĐÚNG số hóa đơn của chính dòng
+  // đó) — theo chữ "C26E2E <gốc>" thì ăn nhầm cả dòng chú thích của bản thay thế.
+  const dong = (so: string) =>
+    table
+      .locator("tbody tr")
+      .filter({ has: page.getByRole("button", { name: `Xem PDF hóa đơn C26E2E ${so}` }) });
+
+  // Bản đã bị thay thế: nhãn riêng, không còn bị gọi là "Cần xử lý", không có nút.
+  await expect(dong(soBiThayThe).getByText("Đã bị thay thế", { exact: true })).toBeVisible({
+    timeout: 15_000,
+  });
+  await expect(dong(soBiThayThe).getByText("Cần xử lý", { exact: true })).toHaveCount(0);
+  await expect(dong(soBiThayThe).getByRole("button", { name: "Nhập kho" })).toHaveCount(0);
+
+  // Bản thay thế: hiện "Cần xử lý", ghi rõ phủ lên hóa đơn nào, và BẤM ĐƯỢC.
+  const soThayThe = await previewRowByPortalId(request, "e2e-uuid-tt-a-new");
+  await expect(dong(String(soThayThe.shdon)).getByText("Cần xử lý", { exact: true })).toBeVisible();
+  await expect(dong(String(soThayThe.shdon)).getByText(`thay thế C26E2E ${soGoc}`)).toBeVisible();
+  await expect(
+    dong(String(soThayThe.shdon)).getByRole("button", { name: "Nhập + phiếu giảm" }),
+  ).toHaveCount(0);
+  await dong(String(soThayThe.shdon)).getByRole("button", { name: "Nhập kho" }).click();
+  await expect(page.getByText("Đã tạo 1 phiếu nhập", { exact: false })).toBeVisible({
+    timeout: 25_000,
+  });
+  await expect(dong(String(soThayThe.shdon)).getByText("Đã nhập kho", { exact: true })).toBeVisible(
+    { timeout: 15_000 },
+  );
+
+  // Dòng tóm tắt đếm riêng nhóm bị phủ — trước đây gộp hết vào "cần xử lý".
+  await expect(page.getByText(/đã bị thay thế\/điều chỉnh 1/)).toBeVisible();
+});
+
+test("Đồng bộ HĐĐT: nhập hóa đơn thay thế sinh phiếu giảm đảo đúng phiếu của bản gốc", async ({
+  page,
+  request,
+}) => {
+  await pauseAutoSync(request);
+  await ensureLoggedIn(page);
+
+  // 1) Hóa đơn gốc 1 cái × 200.000 → nhập kho lấy phiếu PN_gốc.
+  const soGoc = await seedHddtInvoice(request, "e2e-uuid-tt-b-goc", {}, [TT_DONG_GIAM]);
+  const goc = await previewRowByPortalId(request, "e2e-uuid-tt-b-goc");
+  const resGoc = await (
+    await request.post("/api/hddt_sync_import", {
+      data: {
+        ids: [Number(goc.id)],
+        warehouse_code: null,
+        unit_code: null,
+        debit_account: null,
+        credit_account: null,
+      },
+    })
+  ).json();
+  const kqGoc = (resGoc as { results: Array<Record<string, unknown>> }).results[0];
+  expect(kqGoc.ok, `nhập hóa đơn gốc thất bại: ${JSON.stringify(resGoc)}`).toBe(true);
+  const phieuGoc = String(kqGoc.voucher_no);
+  expect(phieuGoc).toMatch(/^PN\d+$/);
+
+  // Mã mặt hàng thực tế do lượt nhập tạo ra — dùng để đọc lô tồn.
+  const dongGoc = (await (
+    await request.post("/api/get_voucher", { data: { voucherNo: phieuGoc } })
+  ).json()) as Array<{ product_code: string; quantity: number }>;
+  const maHang = dongGoc[0].product_code;
+  expect(maHang, "phiếu gốc phải có dòng hàng").toBeTruthy();
+
+  // 2) Hóa đơn thay thế CÙNG mặt hàng (khớp theo tên + ĐVT, đơn giá không nằm
+  // trong danh tính), giá 90.000 → hai phiếu phân biệt được mà tồn vẫn trừ nhau.
+  await seedHddtInvoice(
+    request,
+    "e2e-uuid-tt-b-new",
+    { tthai: 2, khhdgoc: "C26E2E", shdgoc: soGoc },
+    [{ ...TT_DONG_GIAM, dgia: 90000 }],
+  );
+
+  await reopenHddtSync(page);
+  const table = page.locator(".p-datatable").last();
+  const thayThe = table
+    .locator("tbody tr")
+    .filter({ has: page.getByText(`thay thế C26E2E ${soGoc}`, { exact: false }) })
+    .first();
+  // Gốc đã vào kho ⇒ phải báo trước rằng lần bấm này sinh HAI phiếu.
+  await expect(thayThe.getByText(`đã nhập ${phieuGoc}`, { exact: false })).toBeVisible({
+    timeout: 15_000,
+  });
+  await thayThe.getByRole("button", { name: "Nhập + phiếu giảm" }).click();
+
+  const dialog = page.getByRole("alertdialog");
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByText(phieuGoc, { exact: false })).toBeVisible();
+  await dialog.getByRole("button", { name: "Tạo phiếu giảm + phiếu nhập" }).click();
+
+  // Số phiếu giảm hiện ngay trên toast — đó là thứ kế toán phải đi kiểm tra sổ.
+  await expect(page.getByText("Đã tạo phiếu giảm", { exact: false })).toBeVisible({
+    timeout: 25_000,
+  });
+  const chiTiet = await page.locator(".p-toast-detail").last().innerText();
+  const phieuGiam = chiTiet.match(/PN\d+/)?.[0] ?? "";
+  expect(phieuGiam, `không đọc được số phiếu giảm từ toast: ${chiTiet}`).toMatch(/^PN\d+$/);
+  expect(phieuGiam).not.toBe(phieuGoc);
+
+  // 3) Phiếu giảm là điều chỉnh giảm hàng mua: Có 152 / Nợ 331, đúng mặt hàng gốc.
+  const dongGiam = (await (
+    await request.post("/api/get_voucher", { data: { voucherNo: phieuGiam } })
+  ).json()) as Array<{ credit_account: string; debit_account: string; product_code: string }>;
+  expect(
+    dongGiam.some((r) => r.credit_account === "152" && r.debit_account === "331"),
+    `phiếu giảm phải Có 152 / Nợ 331: ${JSON.stringify(dongGiam)}`,
+  ).toBe(true);
+  expect(
+    dongGiam.some((r) => r.product_code === maHang),
+    "phiếu giảm phải đảo đúng mặt hàng của phiếu gốc",
+  ).toBe(true);
+
+  // 4) Lô của bản gốc bị trừ hết — tồn còn lại đúng bằng lô của bản thay thế.
+  const lots = (await (
+    await request.post("/api/get_stock_lots", { data: { productCode: maHang } })
+  ).json()) as Array<{ quantity: number }>;
+  // `get_stock_lots` ẩn lô đã cạn (`depleted = 0`) → còn đúng MỘT lô nghĩa là
+  // lô của phiếu gốc đã bị trừ về 0, không phải chỉ "tổng bằng".
+  expect(lots, `chỉ còn lô của bản thay thế: ${JSON.stringify(lots)}`).toHaveLength(1);
+  const tongTon = lots.reduce((s, l) => s + l.quantity, 0);
+  expect(
+    tongTon,
+    `tồn kho phải còn ${dongGoc[0].quantity} sau khi đảo: ${JSON.stringify(lots)}`,
+  ).toBe(dongGoc[0].quantity);
+
+  // 5) Bản thay thế đã vào kho bằng phiếu KHÁC phiếu gốc.
+  const sau = await previewRowByPortalId(request, "e2e-uuid-tt-b-new");
+  expect(sau.status).toBe("imported");
+  expect(String(sau.voucher_no)).toMatch(/^PN\d+$/);
+  expect(String(sau.voucher_no)).not.toBe(phieuGoc);
 });

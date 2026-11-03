@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id as \"id!\", portal_id, portal_kind, posting_date, nbmst, nbten,\n                  khmshdon as \"khmshdon!\", khhdon, shdon, status, detail_json,\n                  tgtcthue, tgtthue, tgtttbso\n             FROM hddt_purchase_invoice\n            WHERE status = 'pending' AND detail_json = '' AND detail_error = ''",
+  "query": "SELECT id as \"id!\", portal_id, portal_kind, posting_date, nbmst, nbten,\n                      khmshdon as \"khmshdon!\", khhdon, shdon, tthai, khhdgoc, shdgoc,\n                      status, detail_json,\n                  tgtcthue, tgtthue, tgtttbso\n                 FROM hddt_purchase_invoice\n                WHERE status = 'pending' AND detail_json <> '' AND detail_error = ''\n                ORDER BY posting_date, khhdon, shdon",
   "describe": {
     "columns": [
       {
@@ -49,28 +49,43 @@
         "type_info": "Text"
       },
       {
-        "name": "status",
+        "name": "tthai",
         "ordinal": 9,
-        "type_info": "Text"
+        "type_info": "Integer"
       },
       {
-        "name": "detail_json",
+        "name": "khhdgoc",
         "ordinal": 10,
         "type_info": "Text"
       },
       {
-        "name": "tgtcthue",
+        "name": "shdgoc",
         "ordinal": 11,
+        "type_info": "Text"
+      },
+      {
+        "name": "status",
+        "ordinal": 12,
+        "type_info": "Text"
+      },
+      {
+        "name": "detail_json",
+        "ordinal": 13,
+        "type_info": "Text"
+      },
+      {
+        "name": "tgtcthue",
+        "ordinal": 14,
         "type_info": "Float"
       },
       {
         "name": "tgtthue",
-        "ordinal": 12,
+        "ordinal": 15,
         "type_info": "Float"
       },
       {
         "name": "tgtttbso",
-        "ordinal": 13,
+        "ordinal": 16,
         "type_info": "Float"
       }
     ],
@@ -91,8 +106,11 @@
       false,
       false,
       false,
+      false,
+      false,
+      false,
       false
     ]
   },
-  "hash": "4d6a118019b055f73f04928346314c5dc3e6bfd3e6f1f3782409de44125f0631"
+  "hash": "17b4a0e16aa0cae3deb4aad5335f2c49bd0407c583ad4f329f99f6dc9bacc373"
 }

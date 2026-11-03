@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE hddt_imported_invoice SET reversed_voucher_no = ?\n              WHERE khhdon = ? AND shdon = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "aa02fc39e396d6b9b0c01facea955879989bda294054a8e9590d2d0ffebd625d"
+}

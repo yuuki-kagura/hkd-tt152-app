@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(*) FROM journal_entry\n              WHERE voucher_no = ? AND adjust_code = 'GiamCP'",
+  "describe": {
+    "columns": [
+      {
+        "name": "COUNT(*)",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "742c5b0c8196a394f546c6582a048dcbf8e3452615841fa90b4804e1066a9cd9"
+}

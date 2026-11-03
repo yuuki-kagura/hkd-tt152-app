@@ -821,6 +821,22 @@ pub(crate) async fn hddt_sync_test_seed(
     let tgtthue = r2(tgtthue);
     let tgtttbso = r2(tgtcthue + tgtthue);
     let detail_json = detail.to_string();
+    // tthai + con trỏ hóa đơn gốc lấy từ chính payload chi tiết (mock portal và
+    // các test đều gửi nguyên object đó) để e2e dựng được cảnh "hóa đơn thay thế
+    // của một hóa đơn đã nhập kho" — cảnh duy nhất sinh phiếu giảm.
+    let tthai = detail
+        .get("tthai")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(1);
+    let goc_str = |key: &str| {
+        detail
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    let (khhdgoc, shdgoc, tdlhdgoc) = (goc_str("khhdgoc"), goc_str("shdgoc"), goc_str("tdlhdgoc"));
+    let (status, skip_reason) = crate::hddt::sync::classify_tthai(tthai);
     // Số hóa đơn RIÊNG cho từng lần seed: guard "mỗi hóa đơn chỉ được nhập 1
     // phiếu" (stock.rs) chặn nhập lại hóa đơn đã có trong phiếu nhập. Số phải
     // suy ra từ CẢ cache lẫn phiếu nhập đã có — test trước có thể đã xoá cache
@@ -847,23 +863,33 @@ pub(crate) async fn hddt_sync_test_seed(
         "INSERT INTO hddt_purchase_invoice
             (portal_id, portal_kind, tdlap, posting_date, nbmst, nbten, nmmst,
              khmshdon, khhdon, shdon, hthdon, tchat, tgtcthue, tgtthue, ttcktmai,
-             tgtttbso, status, line_count, raw_json, detail_json, created_at)
-         VALUES (?, 'regular', '2026-09-01T17:00:00Z', '2026-09-02', '0106773786',
+             tgtttbso, status, line_count, raw_json, detail_json, created_at,
+             skip_reason, tthai, khhdgoc, shdgoc, tdlhdgoc)
+         VALUES (?, 'regular', strftime('%Y-%m-%dT17:00:00Z', 'now', '-2 days'),
+                 strftime('%Y-%m-%d', 'now', '-2 days'), '0106773786',
                  'Cty TNHH ABC', '001170019085', 1, 'C26E2E', ?, 1, 1,
-                 ?, ?, 0, ?, 'pending', ?, '{}', ?, datetime('now'))
+                 ?, ?, 0, ?, ?, ?, '{}', ?, datetime('now'), ?, ?, ?, ?, ?)
          ON CONFLICT(portal_id) DO NOTHING",
         portal_id,
         shdon,
         tgtcthue,
         tgtthue,
         tgtttbso,
+        status,
         line_count,
-        detail_json
+        detail_json,
+        skip_reason,
+        tthai,
+        khhdgoc,
+        shdgoc,
+        tdlhdgoc
     )
     .execute(&*pool)
     .await
     .map_err(|e| e.to_string())?;
-    Ok("ok".into())
+    // Trả SỐ HÓA ĐƠN vừa seed (test nối hóa đơn thay thế cần nó làm `shdgoc`) —
+    // dạng JSON để web server trả về JSON chứ không phải text thuần.
+    Ok(serde_json::json!({ "shdon": shdon, "khhdon": "C26E2E" }).to_string())
 }
 
 /// Token phiên cổng còn hạn — dùng chung cho client thường và client tương tác.
@@ -1123,7 +1149,8 @@ pub(crate) async fn hddt_sync_import(
             let row: Option<CachedInvoice> = sqlx::query_as!(
                 CachedInvoice,
                 r#"SELECT id as "id!", portal_id, portal_kind, posting_date, nbmst, nbten,
-                          khmshdon as "khmshdon!", khhdon, shdon, status, detail_json,
+                          khmshdon as "khmshdon!", khhdon, shdon, tthai, khhdgoc, shdgoc,
+                          status, detail_json,
                   tgtcthue, tgtthue, tgtttbso
                      FROM hddt_purchase_invoice WHERE id = ?"#,
                 id
@@ -1140,7 +1167,8 @@ pub(crate) async fn hddt_sync_import(
         sqlx::query_as!(
             CachedInvoice,
             r#"SELECT id as "id!", portal_id, portal_kind, posting_date, nbmst, nbten,
-                      khmshdon as "khmshdon!", khhdon, shdon, status, detail_json,
+                      khmshdon as "khmshdon!", khhdon, shdon, tthai, khhdgoc, shdgoc,
+                      status, detail_json,
                   tgtcthue, tgtthue, tgtttbso
                  FROM hddt_purchase_invoice
                 WHERE status = 'pending' AND detail_json <> '' AND detail_error = ''
@@ -1199,7 +1227,12 @@ pub(crate) async fn hddt_sync_import(
             }));
             continue;
         }
-        if inv.status != "pending" {
+        // Nút hàng loạt chỉ lấy 'pending' (branches trên), còn bấm từng dòng thì
+        // cho cả hóa đơn THAY THẾ/ĐIỀU CHỈNH — chính hai loại này bị UI cũ bỏ rơi.
+        // Bản đã bị thay thế/điều chỉnh/hủy vẫn bị chặn ở import_invoice.
+        let importable =
+            inv.status == "pending" || (inv.status == "manual" && matches!(inv.tthai, 2 | 3));
+        if !importable {
             results.push(serde_json::json!({
                 "portal_id": inv.portal_id, "ok": false, "voucher_no": "",
                 "products_created": 0,

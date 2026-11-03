@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT reversed_voucher_no FROM hddt_imported_invoice WHERE shdon = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "reversed_voucher_no",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "414ce02f42e3c7292cd58b9943788bc65309e88f28249e6fa16adcfa7004a9ad"
+}

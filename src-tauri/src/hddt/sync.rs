@@ -251,6 +251,13 @@ pub(crate) struct CachedInvoice {
     pub(crate) khmshdon: i64,
     pub(crate) khhdon: String,
     pub(crate) shdon: String,
+    /// Trạng thái hóa đơn cổng: 1 mới · 2 thay thế · 3 điều chỉnh · 4/5/6 đã bị
+    /// thay thế/điều chỉnh/hủy. Quyết định có được nhập và có phải đảo phiếu gốc
+    /// hay không (`classify_tthai`).
+    pub(crate) tthai: i64,
+    /// Ký hiệu + số hóa đơn gốc mà bản này thay thế/điều chỉnh (rỗng nếu không có).
+    pub(crate) khhdgoc: String,
+    pub(crate) shdgoc: String,
     pub(crate) status: String,
     pub(crate) detail_json: String,
     /// Tổng tiền hàng trước thuế (theo hóa đơn) — dùng đối chiếu với tổng dòng.
@@ -1034,25 +1041,15 @@ async fn upsert_invoice(pool: &SqlitePool, row: &Value, kind: InvoiceKind) -> Re
     let tdlap = f(row, "tdlap");
     // tdlap của cổng là ISO UTC (vd 2026-09-23T17:00:00Z = 24/09 giờ Việt).
     let posting_date = parse_tdlap(&tdlap);
-    let status = if int(row, "tthai") == 1 {
-        "pending"
-    } else {
-        "manual"
-    };
-    let reason = if int(row, "tthai") == 1 {
-        String::new()
-    } else {
-        format!(
-            "Hóa đơn tthai={} — không tự tạo phiếu nhập",
-            int(row, "tthai")
-        )
-    };
+    let tthai = int(row, "tthai");
+    let (status, reason) = classify_tthai(tthai);
     let raw_json = row.to_string();
     // Mọi giá trị bind vào biến trước: macro sqlx giữ tham chiếu tới hết `.await`
     // nên truyền biểu thức tạm (f(...)/int(...)/kind_str(...)) sẽ báo E0716.
     let (nbmst, nbten, nmmst) = (f(row, "nbmst"), f(row, "nbten"), f(row, "nmmst"));
     let (khmshdon, hthdon, tchat) = (int(row, "khmshdon"), int(row, "hthdon"), int(row, "tchat"));
     let (khhdon, shdon) = (f(row, "khhdon"), f(row, "shdon"));
+    let (khhdgoc, shdgoc, tdlhdgoc) = (f(row, "khhdgoc"), f(row, "shdgoc"), f(row, "tdlhdgoc"));
     let (tgtcthue, tgtthue) = (num(row, "tgtcthue"), num(row, "tgtthue"));
     let (ttcktmai, tgtttbso) = (num(row, "ttcktmai"), num(row, "tgtttbso"));
     let portal_kind = kind_str(kind);
@@ -1061,8 +1058,9 @@ async fn upsert_invoice(pool: &SqlitePool, row: &Value, kind: InvoiceKind) -> Re
             (portal_id, portal_kind, tdlap, posting_date, nbmst, nbten, nmmst,
              khmshdon, khhdon, shdon, hthdon, tchat,
              tgtcthue, tgtthue, ttcktmai, tgtttbso, status, skip_reason,
+             tthai, khhdgoc, shdgoc, tdlhdgoc,
              raw_json, created_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))
          ON CONFLICT(portal_id) DO NOTHING",
         portal_id,
         portal_kind,
@@ -1082,6 +1080,10 @@ async fn upsert_invoice(pool: &SqlitePool, row: &Value, kind: InvoiceKind) -> Re
         tgtttbso,
         status,
         reason,
+        tthai,
+        khhdgoc,
+        shdgoc,
+        tdlhdgoc,
         raw_json,
     )
     .execute(pool)
@@ -1094,6 +1096,33 @@ fn kind_str(kind: InvoiceKind) -> &'static str {
     match kind {
         InvoiceKind::Regular => "regular",
         InvoiceKind::CashRegister => "cash-register",
+    }
+}
+
+/// Trạng thái hóa đơn cổng (`tthai`) → (trạng thái dòng cache, lý do hiển thị).
+///
+/// Ba nhóm khác nhau hẳn về việc phải làm, gộp chung một nhãn "cần xử lý" là
+/// nguồn của đường cụt cũ (hóa đơn thay thế thì không có nút nhập, còn hóa đơn
+/// đã bị thay thế thì bị đếm nhầm thành việc của kế toán):
+/// · 1 mới → `pending`, tự nhập hàng loạt được.
+/// · 2 thay thế / 3 điều chỉnh → `manual`: kế toán bấm từng dòng vì bản thay thế
+///   có thể kéo theo phiếu điều chỉnh giảm của phiếu gốc.
+/// · 4/5/6 đã bị thay thế/điều chỉnh/hủy → `superseded`: không bao giờ nhập.
+pub(crate) fn classify_tthai(tthai: i64) -> (&'static str, String) {
+    match tthai {
+        1 => ("pending", String::new()),
+        2 => ("manual", "Hóa đơn thay thế — bấm Nhập kho".into()),
+        3 => ("manual", "Hóa đơn điều chỉnh — bấm Nhập kho".into()),
+        4 => (
+            "superseded",
+            "Hóa đơn đã bị thay thế — không nhập kho".into(),
+        ),
+        5 => (
+            "superseded",
+            "Hóa đơn đã bị điều chỉnh — không nhập kho".into(),
+        ),
+        6 => ("superseded", "Hóa đơn đã bị hủy — không nhập kho".into()),
+        other => ("manual", format!("Hóa đơn tthai={other} — cần người xử lý")),
     }
 }
 
@@ -1143,7 +1172,8 @@ pub(crate) async fn cached_by_portal_id(
 ) -> Result<Option<CachedInvoice>, String> {
     sqlx::query_as::<_, CachedInvoice>(
         r#"SELECT id, portal_id, portal_kind, posting_date, nbmst, nbten,
-                  COALESCE(khmshdon, 0) AS khmshdon, khhdon, shdon, status, detail_json,
+                  COALESCE(khmshdon, 0) AS khmshdon, khhdon, shdon, tthai, khhdgoc, shdgoc,
+                  status, detail_json,
                   tgtcthue, tgtthue, tgtttbso
              FROM hddt_purchase_invoice
             WHERE portal_id = ?"#,
@@ -1159,7 +1189,8 @@ async fn pending_without_detail(pool: &SqlitePool) -> Result<Vec<CachedInvoice>,
     let rows: Vec<CachedInvoice> = sqlx::query_as!(
         CachedInvoice,
         r#"SELECT id as "id!", portal_id, portal_kind, posting_date, nbmst, nbten,
-                  khmshdon as "khmshdon!", khhdon, shdon, status, detail_json,
+                  khmshdon as "khmshdon!", khhdon, shdon, tthai, khhdgoc, shdgoc,
+                  status, detail_json,
                   tgtcthue, tgtthue, tgtttbso
              FROM hddt_purchase_invoice
             WHERE status = 'pending' AND detail_json = '' AND detail_error = ''"#
@@ -1325,6 +1356,9 @@ pub(crate) struct ImportOutcome {
     pub(crate) updated: bool,
     pub(crate) message: String,
     pub(crate) voucher_no: String,
+    /// Phiếu điều chỉnh giảm đã tạo để đảo phiếu nhập của hóa đơn gốc. Rỗng khi
+    /// không có gì phải đảo (hóa đơn mới, hoặc bản gốc chưa từng nhập kho).
+    pub(crate) reversal_voucher_no: String,
     pub(crate) products_created: usize,
 }
 
@@ -1372,6 +1406,17 @@ pub(crate) async fn import_invoice(
     debit_account: &str,
     credit_account: &str,
 ) -> Result<ImportOutcome, String> {
+    // Bản đã bị thay thế/điều chỉnh/hủy thì tuyệt đối không vào kho — kể cả khi
+    // ai đó gọi thẳng lệnh nhập với id của nó (UI đã ẩn nút này đi).
+    if matches!(inv.tthai, 4..=6) {
+        return Err(format!(
+            "Hóa đơn {} {} {} — không nhập kho.",
+            inv.khhdon,
+            inv.shdon,
+            classify_tthai(inv.tthai).1
+        ));
+    }
+
     // Đã có trong bảng hóa đơn chính thức → không tạo phiếu lần nữa (cache có
     // thể bị xoá rồi quét lại cùng ngày đó).
     if let Some(voucher_no) = sqlx::query_scalar!(
@@ -1390,6 +1435,7 @@ pub(crate) async fn import_invoice(
             updated: false,
             message: format!("Đã nhập kho trước đó — phiếu {voucher_no}"),
             voucher_no,
+            reversal_voucher_no: String::new(),
             products_created: 0,
         });
     }
@@ -1619,14 +1665,19 @@ pub(crate) async fn import_invoice(
     )
     .await?;
     let overwrite = matched.is_some();
-    let voucher_no = match &matched {
-        Some(m) => m.voucher_no.clone(),
-        None => next_inbound_voucher_no(pool).await?,
-    };
     let effective_warehouse = match &matched {
         Some(m) if warehouse_code.trim().is_empty() => m.warehouse_code.clone(),
         _ => warehouse_code.to_string(),
     };
+    let unit = if unit_code.is_empty() {
+        "HKD"
+    } else {
+        unit_code
+    };
+
+    // 3b) Bản thay thế đã nhập kho rồi thì phải đảo phiếu nhập của bản gốc —
+    // xem `reversal_for_replaced_original`.
+    let reversal = reversal_for_replaced_original(pool, inv).await?;
 
     // 4) Ghi phiếu trong CÙNG transaction với liên kết hóa đơn + xoá cache.
     let description = format!(
@@ -1648,6 +1699,63 @@ pub(crate) async fn import_invoice(
         exclude_id: matched.as_ref().map(|m| m.id),
     };
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+
+    // Số phiếu cấp NGAY TRONG tx và theo thứ tự: phiếu giảm chiếm số trước, phiếu
+    // nhập mới lấy số kế tiếp. Cấp từ pool khi tx đang mở vừa kẹt connection vừa
+    // không thấy phiếu vừa INSERT → hai phiếu trùng số.
+    let mut reversal_voucher_no = String::new();
+    if let Some(r) = &reversal {
+        let giam_no = next_inbound_voucher_no(&mut *tx).await?;
+        let giam_desc = format!(
+            "Điều chỉnh giảm hoàn phiếu {} (hóa đơn gốc {} {}) theo hóa đơn thay thế {}{}",
+            r.voucher_no, inv.khhdgoc, inv.shdgoc, inv.khhdon, inv.shdon
+        );
+        let giam_ref = format!("{}{}-GIAM", inv.khhdon, inv.shdon);
+        // Đầu phiếu giảm KHÔNG mang ký hiệu/số/ngày hóa đơn gốc: số đó đã gắn với
+        // phiếu nhập đang tồn tại, mang lại là đụng chốt chống trùng hóa đơn.
+        let giam_extra = crate::commands::stock::InboundExtra {
+            source: "hddt",
+            ..Default::default()
+        };
+        crate::commands::stock::save_inbound_core_tx(
+            &mut tx,
+            &inv.posting_date,
+            &giam_no,
+            &giam_desc,
+            &supplier_code,
+            &effective_warehouse,
+            unit,
+            &r.items,
+            "",
+            "adjust",
+            &giam_ref,
+            0.0,
+            debit_account,
+            credit_account,
+            false,
+            "down",
+            false,
+            &giam_extra,
+        )
+        .await?;
+        // Dấu "đã đảo": nhập lại bản thay thế không tạo phiếu giảm lần hai.
+        sqlx::query!(
+            "UPDATE hddt_imported_invoice SET reversed_voucher_no = ?
+              WHERE khhdon = ? AND shdon = ?",
+            giam_no,
+            inv.khhdgoc,
+            inv.shdgoc
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+        reversal_voucher_no = giam_no;
+    }
+
+    let voucher_no = match &matched {
+        Some(m) => m.voucher_no.clone(),
+        None => next_inbound_voucher_no(&mut *tx).await?,
+    };
     if let Some(m) = &matched {
         crate::commands::stock::clear_inbound_for_overwrite(&mut tx, m).await?;
     }
@@ -1658,11 +1766,7 @@ pub(crate) async fn import_invoice(
         &description,
         &supplier_code,
         &effective_warehouse,
-        if unit_code.is_empty() {
-            "HKD"
-        } else {
-            unit_code
-        },
+        unit,
         &items,
         "",
         "purchase",
@@ -1728,24 +1832,95 @@ pub(crate) async fn import_invoice(
         .map_err(|e| e.to_string())?;
     tx.commit().await.map_err(|e| e.to_string())?;
 
+    let mut message = if overwrite {
+        format!(
+            "Đã cập nhật phiếu {} theo hóa đơn · {} dòng · tổng {}",
+            voucher_no, result.entries, result.total
+        )
+    } else {
+        format!(
+            "Đã tạo phiếu {} · {} dòng · {} hàng mới · tổng {}",
+            voucher_no, result.entries, created, result.total
+        )
+    };
+    if !reversal_voucher_no.is_empty() {
+        message = format!(
+            "Đã tạo phiếu giảm {} (hoàn hóa đơn gốc {} {}) và phiếu nhập {} · {} dòng · tổng {}",
+            reversal_voucher_no, inv.khhdgoc, inv.shdgoc, voucher_no, result.entries, result.total
+        );
+    }
+
     Ok(ImportOutcome {
         portal_id: inv.portal_id.clone(),
         ok: true,
         updated: overwrite,
-        message: if overwrite {
-            format!(
-                "Đã cập nhật phiếu {} theo hóa đơn · {} dòng · tổng {}",
-                voucher_no, result.entries, result.total
-            )
-        } else {
-            format!(
-                "Đã tạo phiếu {} · {} dòng · {} hàng mới · tổng {}",
-                voucher_no, result.entries, created, result.total
-            )
-        },
+        message,
         voucher_no,
+        reversal_voucher_no,
         products_created: created,
     })
+}
+
+/// Dòng hàng của phiếu nhập gốc cần đảo ngược khi nhập bản thay thế.
+struct ReplacedOriginal {
+    voucher_no: String,
+    items: Vec<crate::models::InboundItemInput>,
+}
+
+/// Phiếu nhập của hóa đơn GỐC mà bản này thay thế, nếu đã trót tạo và CHƯA bị
+/// đảo. Không có gì để đảo khi: gốc chưa nhập kho, hoặc `reversed_voucher_no`
+/// đã ghi (lượt nhập trước đã đảo rồi).
+///
+/// Chỉ áp dụng cho `tthai = 2` (thay thế) — bản thay thế phủ định toàn bộ hóa đơn
+/// gốc. `tthai = 3` (điều chỉnh) KHÔNG đảo: hóa đơn gốc vẫn còn hiệu lực, bản
+/// điều chỉnh chỉ bổ sung/sửa một phần, đảo cả gốc sẽ làm âm tồn kho.
+async fn reversal_for_replaced_original(
+    pool: &SqlitePool,
+    inv: &CachedInvoice,
+) -> Result<Option<ReplacedOriginal>, String> {
+    if inv.tthai != 2 || inv.shdgoc.trim().is_empty() || inv.khhdgoc.trim().is_empty() {
+        return Ok(None);
+    }
+    let goc = sqlx::query!(
+        "SELECT iv.voucher_no, hi.reversed_voucher_no
+           FROM hddt_imported_invoice hi
+           JOIN inbound_voucher iv ON iv.id = hi.inbound_voucher_id
+          WHERE hi.khhdon = ? AND hi.shdon = ?",
+        inv.khhdgoc,
+        inv.shdgoc
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    let Some(goc) = goc else {
+        return Ok(None);
+    };
+    if !goc.reversed_voucher_no.trim().is_empty() {
+        return Ok(None);
+    }
+    // Dựng lại đúng các dòng đã ghi sổ của phiếu gốc. `inbound_prefill_core` cố ý
+    // gỡ tham chiếu hóa đơn khỏi đầu phiếu — phiếu giảm mang số HĐ gốc sẽ bị coi
+    // là nhập trùng hóa đơn.
+    let prefill = crate::commands::stock::inbound_prefill_core(pool, &goc.voucher_no).await?;
+    let items: Vec<crate::models::InboundItemInput> = serde_json::from_value(
+        prefill
+            .get("items")
+            .cloned()
+            .unwrap_or_else(|| Value::Array(Vec::new())),
+    )
+    .map_err(|e| {
+        format!(
+            "Không dựng lại được dòng hàng của phiếu gốc {voucher}: {e}",
+            voucher = goc.voucher_no
+        )
+    })?;
+    if items.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(ReplacedOriginal {
+        voucher_no: goc.voucher_no,
+        items,
+    }))
 }
 
 /// Đảm bảo có nhà cung cấp theo MST (mã = MST, trùng thì dùng lại).
@@ -1785,9 +1960,16 @@ pub(crate) async fn ensure_supplier(
 }
 
 /// Số phiếu nhập tiếp theo: PN0001… đánh số trên bảng inbound_voucher.
-pub(crate) async fn next_inbound_voucher_no(pool: &SqlitePool) -> Result<String, String> {
+///
+/// Nhận executor bất kỳ (pool hoặc transaction đang mở): một lượt nhập hóa đơn
+/// thay thế phải lấy số HAI lần — lần thứ hai phải thấy đúng phiếu giảm vừa
+/// INSERT trong cùng transaction, nếu đọc từ pool sẽ sinh trùng số phiếu.
+pub(crate) async fn next_inbound_voucher_no<'e, E>(exec: E) -> Result<String, String>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
     let rows: Vec<String> = sqlx::query_scalar!("SELECT voucher_no FROM inbound_voucher")
-        .fetch_all(pool)
+        .fetch_all(exec)
         .await
         .map_err(|e| e.to_string())?;
     let max = rows
@@ -1873,6 +2055,15 @@ pub(crate) struct PreviewRow {
     pub(crate) tgtttbso: f64,
     pub(crate) voucher_no: String,
     pub(crate) detail_error: String,
+    /// Trạng thái hóa đơn cổng (1 mới · 2 thay thế · 3 điều chỉnh · 4/5/6 đã bị
+    /// thay thế/điều chỉnh/hủy) — UI cần để biết dòng `manual` có nhập được không.
+    pub(crate) tthai: i64,
+    /// "C26MYY 111" — hóa đơn gốc mà bản này thay thế/điều chỉnh; rỗng nếu không có.
+    pub(crate) goc_hd: String,
+    /// Phiếu nhập ĐÃ TỒN tại của hóa đơn gốc: nhập bản thay thế sẽ kéo theo phiếu
+    /// điều chỉnh giảm cho phiếu này. Rỗng khi gốc chưa vào kho hoặc chính nó là
+    /// hóa đơn mới.
+    pub(crate) goc_voucher_no: String,
 }
 
 /// Tóm tắt xem trước.
@@ -1882,6 +2073,9 @@ pub(crate) struct PreviewSummary {
     pub(crate) pending: usize,
     pub(crate) imported: usize,
     pub(crate) manual: usize,
+    /// Bản đã bị thay thế/điều chỉnh/hủy — không phải việc của kế toán, tách khỏi
+    /// `manual` để "cần xử lý" chỉ đếm những dòng thực sự còn thao tác.
+    pub(crate) superseded: usize,
     pub(crate) new_products: usize,
     pub(crate) total_value: f64,
     pub(crate) days_cached: usize,
@@ -1900,17 +2094,24 @@ pub(crate) async fn preview(
     // `id = 0` (không có hành động) để không lẫn id với dòng cache.
     let rows: Vec<PreviewRow> = sqlx::query_as!(
         PreviewRow,
-        "SELECT id, portal_id, posting_date, nbmst, nbten, khhdon, shdon,
-                COALESCE(khmshdon, 0) AS khmshdon, portal_kind,
-                status, skip_reason, line_count, new_product_count,
-                tgtcthue, tgtthue, ttcktmai, tgtttbso, voucher_no, detail_error
-           FROM hddt_purchase_invoice
-          WHERE (? = '' OR posting_date >= ?) AND (? = '' OR posting_date <= ?)
+        "SELECT pi.id, pi.portal_id, pi.posting_date, pi.nbmst, pi.nbten, pi.khhdon, pi.shdon,
+                COALESCE(pi.khmshdon, 0) AS khmshdon, pi.portal_kind,
+                pi.status, pi.skip_reason, pi.line_count, pi.new_product_count,
+                pi.tgtcthue, pi.tgtthue, pi.ttcktmai, pi.tgtttbso, pi.voucher_no,
+                pi.detail_error, pi.tthai,
+                COALESCE(TRIM(pi.khhdgoc || ' ' || pi.shdgoc), '') AS goc_hd,
+                COALESCE((SELECT giv.voucher_no
+                            FROM hddt_imported_invoice gi
+                            JOIN inbound_voucher giv ON giv.id = gi.inbound_voucher_id
+                           WHERE gi.khhdon = pi.khhdgoc AND gi.shdon = pi.shdgoc
+                           LIMIT 1), '') AS goc_voucher_no
+           FROM hddt_purchase_invoice pi
+          WHERE (? = '' OR pi.posting_date >= ?) AND (? = '' OR pi.posting_date <= ?)
          UNION ALL
          SELECT 0, hi.portal_id, hi.posting_date, hi.nbmst, hi.nbten, hi.khhdon, hi.shdon,
                 COALESCE(hi.khmshdon, 0), hi.portal_kind, 'imported', '', hi.line_count,
                 hi.new_product_count, hi.tgtcthue, hi.tgtthue, hi.ttcktmai, hi.tgtttbso,
-                COALESCE(iv.voucher_no, ''), ''
+                COALESCE(iv.voucher_no, ''), '', 0, '', ''
            FROM hddt_imported_invoice hi
            LEFT JOIN inbound_voucher iv ON iv.id = hi.inbound_voucher_id
           WHERE (? = '' OR hi.posting_date >= ?) AND (? = '' OR hi.posting_date <= ?)
@@ -1938,6 +2139,7 @@ pub(crate) async fn preview(
         pending: rows.iter().filter(|r| r.status == "pending").count(),
         imported: rows.iter().filter(|r| r.status == "imported").count(),
         manual: rows.iter().filter(|r| r.status == "manual").count(),
+        superseded: rows.iter().filter(|r| r.status == "superseded").count(),
         new_products: rows
             .iter()
             .filter(|r| r.status == "pending")
@@ -1964,9 +2166,17 @@ mod tests {
     /// bộ ký hiệu + số + ngày (trùng là cùng 1 hóa đơn, import sẽ chặn).
     static SEED_SEQ: AtomicU64 = AtomicU64::new(1);
 
-    /// Chèn 1 hóa đơn cache + chi tiết giả, chạy import, kiểm tra chuỗi liên kết.
-    async fn seed_invoice(pool: &SqlitePool, portal_id: &str, tthai: i64, lines: &str) -> i64 {
-        let status = if tthai == 1 { "pending" } else { "manual" };
+    /// Chèn 1 hóa đơn cache + chi tiết giả. `tthai` cho ra trạng thái ĐÚNG NHƯ lúc
+    /// quét cổng thật (dùng chung `classify_tthai`), `goc` = (ký hiệu, số) của hóa
+    /// đơn gốc mà bản này thay thế/điều chỉnh — `("", "")` nếu không có.
+    async fn seed_invoice_full(
+        pool: &SqlitePool,
+        portal_id: &str,
+        tthai: i64,
+        lines: &str,
+        goc: (&str, &str),
+    ) -> i64 {
+        let (status, skip_reason) = classify_tthai(tthai);
         let parsed: Value = serde_json::from_str(&format!("[{lines}]")).unwrap();
         let arr = parsed.as_array().unwrap();
         let line_count = arr.len() as i64;
@@ -1988,20 +2198,27 @@ mod tests {
         let tgtttbso = round2(tgtcthue + tgtthue);
         let shdon = format!("{:03}", SEED_SEQ.fetch_add(1, Ordering::Relaxed));
         let detail = format!("{{\"hdhhdvu\":[{lines}]}}");
+        let (khhdgoc, shdgoc) = goc;
         sqlx::query!(
             "INSERT INTO hddt_purchase_invoice
                 (portal_id, portal_kind, tdlap, posting_date, nbmst, nbten, nmmst,
                  khmshdon, khhdon, shdon, hthdon, tchat, tgtcthue, tgtthue, ttcktmai,
-                 tgtttbso, status, skip_reason, line_count, raw_json, detail_json)
+                 tgtttbso, status, skip_reason, tthai, khhdgoc, shdgoc,
+                 line_count, raw_json, detail_json)
              VALUES (?, 'regular', '2026-09-01T17:00:00Z', '2026-09-02', '0106773786',
                      'Cty TNHH ABC', '001170019085', 1, 'C26ABC', ?, 1, 1,
-                     ?, ?, 0, ?, ?, '', ?, '{}', ?)",
+                     ?, ?, 0, ?, ?, ?, ?, ?, ?,
+                     ?, '{}', ?)",
             portal_id,
             shdon,
             tgtcthue,
             tgtthue,
             tgtttbso,
             status,
+            skip_reason,
+            tthai,
+            khhdgoc,
+            shdgoc,
             line_count,
             detail
         )
@@ -2017,11 +2234,25 @@ mod tests {
         .unwrap()
     }
 
+    async fn seed_invoice(pool: &SqlitePool, portal_id: &str, tthai: i64, lines: &str) -> i64 {
+        seed_invoice_full(pool, portal_id, tthai, lines, ("", "")).await
+    }
+
+    /// Số hóa đơn của một dòng cache — phải đọc TRƯỚC khi import, vì import xoá
+    /// dòng cache. Dùng khi seed hóa đơn thay thế trỏ về hóa đơn gốc đã nhập.
+    async fn shdon_of(pool: &SqlitePool, id: i64) -> String {
+        sqlx::query_scalar!("SELECT shdon FROM hddt_purchase_invoice WHERE id = ?", id)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
     async fn load(pool: &SqlitePool, id: i64) -> CachedInvoice {
         sqlx::query_as!(
             CachedInvoice,
             r#"SELECT id as "id!", portal_id, portal_kind, posting_date, nbmst, nbten,
-                      khmshdon as "khmshdon!", khhdon, shdon, status, detail_json,
+                      khmshdon as "khmshdon!", khhdon, shdon, tthai, khhdgoc, shdgoc,
+                      status, detail_json,
                   tgtcthue, tgtthue, tgtttbso
                  FROM hddt_purchase_invoice WHERE id = ?"#,
             id
@@ -2452,7 +2683,8 @@ mod tests {
         let row: CachedInvoice = sqlx::query_as!(
             CachedInvoice,
             r#"SELECT id as "id!", portal_id, portal_kind, posting_date, nbmst, nbten,
-                      khmshdon as "khmshdon!", khhdon, shdon, status, detail_json,
+                      khmshdon as "khmshdon!", khhdon, shdon, tthai, khhdgoc, shdgoc,
+                      status, detail_json,
                   tgtcthue, tgtthue, tgtttbso
                  FROM hddt_purchase_invoice LIMIT 1"#
         )
@@ -3765,5 +3997,306 @@ mod tests {
             err.contains("đã có trong phiếu nhập PN-TRUNG-1"),
             "thông báo phải chỉ phiếu cũ: {err}"
         );
+    }
+
+    // ─── Hóa đơn thay thế (tthai=2) / điều chỉnh (tthai=3) / đã bị thay thế (4-6) ───
+
+    const LINE_GOC: &str = r#"{"ten":"Oc vit cac loai","dvtinh":"Tui","mhhdvu":"ocvit",
+                               "sluong":10.0,"dgia":10000.0,"stckhau":0.0,"tsuat":0.0}"#;
+
+    async fn count(pool: &SqlitePool, sql: &str) -> i64 {
+        sqlx::query_scalar::<_, i64>(sql)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    /// Nhãn "Cần xử lý" từng gộp chung hai loại trái ngược nhau: bản thay thế thì
+    /// phải nhập được, bản đã bị thay thế thì không có việc gì mà làm.
+    #[test]
+    fn classify_tthai_tach_ban_bi_thay_the_khoi_can_xu_ly() {
+        assert_eq!(classify_tthai(1).0, "pending");
+        assert_eq!(classify_tthai(2).0, "manual");
+        assert_eq!(classify_tthai(3).0, "manual");
+        for t in [4, 5, 6] {
+            assert_eq!(
+                classify_tthai(t).0,
+                "superseded",
+                "tthai={t} là bản đã bị thay thế/điều chỉnh/hủy"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn preview_dem_superseded_rieng_khoi_can_xu_ly() {
+        let pool = test_pool().await;
+        seed_invoice(&pool, "uuid-sum-new", 1, LINE_GOC).await;
+        seed_invoice(&pool, "uuid-sum-rep", 2, LINE_GOC).await;
+        seed_invoice(&pool, "uuid-sum-sup", 4, LINE_GOC).await;
+        let (_rows, sum) = preview(&pool, "", "").await.unwrap();
+        assert_eq!(sum.pending, 1);
+        assert_eq!(
+            sum.manual, 1,
+            "chỉ bản thay thế/điều chỉnh còn là việc phải làm"
+        );
+        assert_eq!(sum.superseded, 1);
+    }
+
+    #[tokio::test]
+    async fn preview_lo_phieu_goc_cua_hoa_don_thay_the() {
+        let pool = test_pool().await;
+        let goc = seed_invoice(&pool, "uuid-pv-goc", 1, LINE_GOC).await;
+        let goc_no = shdon_of(&pool, goc).await;
+        let goc_voucher = import_invoice(&pool, &load(&pool, goc).await, "", "HKD", "", "")
+            .await
+            .unwrap()
+            .voucher_no;
+        seed_invoice_full(&pool, "uuid-pv-rep", 2, LINE_GOC, ("C26ABC", &goc_no)).await;
+
+        let (rows, _sum) = preview(&pool, "", "").await.unwrap();
+        let rep = rows
+            .iter()
+            .find(|r| r.portal_id == "uuid-pv-rep")
+            .expect("dòng hóa đơn thay thế");
+        assert_eq!(rep.goc_hd, format!("C26ABC {goc_no}"), "phải hiện gốc");
+        assert_eq!(
+            rep.goc_voucher_no, goc_voucher,
+            "UI cần biết gốc đã vào kho để báo trước phiếu giảm"
+        );
+    }
+
+    #[tokio::test]
+    async fn import_superseded_bi_chan_khi_goi_thang_ids() {
+        let pool = test_pool().await;
+        let id = seed_invoice(&pool, "uuid-super", 4, LINE_GOC).await;
+        let err = import_invoice(&pool, &load(&pool, id).await, "", "HKD", "", "")
+            .await
+            .expect_err("bản đã bị thay thế không bao giờ vào kho");
+        assert!(
+            err.contains("không nhập kho"),
+            "thông báo phải nêu lý do: {err}"
+        );
+        assert_eq!(
+            count(&pool, "SELECT COUNT(*) FROM inbound_voucher").await,
+            0
+        );
+    }
+
+    /// Đúng ca C26MYY 111/112 ngoài đời: bản gốc chưa từng nhập kho → bản thay
+    /// thế chỉ tạo đúng một phiếu nhập, không có phiếu giảm.
+    #[tokio::test]
+    async fn import_thay_the_khong_dao_khi_goc_cha_nhap_kho() {
+        let pool = test_pool().await;
+        let goc = seed_invoice(&pool, "uuid-111", 1, LINE_GOC).await;
+        let goc_no = shdon_of(&pool, goc).await;
+        let rep = seed_invoice_full(&pool, "uuid-112", 2, LINE_GOC, ("C26ABC", &goc_no)).await;
+
+        let out = import_invoice(&pool, &load(&pool, rep).await, "", "HKD", "", "")
+            .await
+            .expect("nhập hóa đơn thay thế");
+        assert_eq!(
+            out.reversal_voucher_no, "",
+            "gốc chưa nhập thì không có gì để đảo"
+        );
+        assert_eq!(
+            count(&pool, "SELECT COUNT(*) FROM inbound_voucher").await,
+            1
+        );
+    }
+
+    /// Gốc đã vào kho → một lần bấm phải tạo phiếu giảm TRƯỚC rồi phiếu nhập SAU
+    /// (thứ tự này quyết định FIFO trừ đúng lô cũ), và ghi dấu đã đảo.
+    #[tokio::test]
+    async fn import_thay_the_dao_phieu_goc_roi_nhap_ban_moi() {
+        let pool = test_pool().await;
+        let goc = seed_invoice(&pool, "uuid-200", 1, LINE_GOC).await;
+        let goc_no = shdon_of(&pool, goc).await;
+        let goc_voucher = import_invoice(&pool, &load(&pool, goc).await, "", "HKD", "", "")
+            .await
+            .unwrap()
+            .voucher_no;
+
+        let rep = seed_invoice_full(&pool, "uuid-201", 2, LINE_GOC, ("C26ABC", &goc_no)).await;
+        let out = import_invoice(&pool, &load(&pool, rep).await, "", "HKD", "", "")
+            .await
+            .expect("nhập hóa đơn thay thế có gốc đã nhập");
+
+        assert!(!out.reversal_voucher_no.is_empty(), "phải có phiếu giảm");
+        assert_ne!(out.reversal_voucher_no, out.voucher_no, "hai phiếu hai số");
+        assert!(
+            out.message.contains("phiếu giảm"),
+            "toast nói rõ đã tạo gì: {}",
+            out.message
+        );
+
+        let giam_type: String = sqlx::query_scalar!(
+            "SELECT inbound_type FROM inbound_voucher WHERE voucher_no = ?",
+            out.reversal_voucher_no
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            giam_type, "adjust",
+            "phiếu giảm là điều chỉnh, không phải nhập mua"
+        );
+
+        // Số hóa đơn gốc đã gắn với phiếu nhập đang có — phiếu giảm mang lại số đó
+        // là đụng chốt chống trùng hóa đơn.
+        let giam_serial: String = sqlx::query_scalar!(
+            "SELECT invoice_serial FROM inbound_voucher WHERE voucher_no = ?",
+            out.reversal_voucher_no
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(giam_serial, "", "phiếu giảm không mang ký hiệu hóa đơn gốc");
+
+        let giam_cp: i64 = sqlx::query_scalar!(
+            "SELECT COUNT(*) FROM journal_entry
+              WHERE voucher_no = ? AND adjust_code = 'GiamCP'",
+            out.reversal_voucher_no
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(giam_cp > 0, "bút toán giảm phải mang mã GiamCP");
+        let co152: i64 = sqlx::query_scalar!(
+            "SELECT COUNT(*) FROM journal_entry
+              WHERE voucher_no = ? AND credit_account = '152'",
+            out.reversal_voucher_no
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(co152 > 0, "giảm hàng mua phải Có 152 (đảo Nợ 152/Có 331)");
+
+        // Lô của phiếu gốc bị trừ hết (10 nhập, 10 trả) — phiếu nhập mới là lô sau.
+        let lot_qty: f64 = sqlx::query_scalar!(
+            r#"SELECT COALESCE(SUM(quantity), 0.0) as "q!: f64" FROM stock_lot
+                WHERE inbound_voucher_id = (SELECT id FROM inbound_voucher WHERE voucher_no = ?)"#,
+            goc_voucher
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(lot_qty, 0.0, "lô gốc phải trừ về 0");
+
+        let marked: String = sqlx::query_scalar!(
+            "SELECT reversed_voucher_no FROM hddt_imported_invoice WHERE shdon = ?",
+            goc_no
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(marked, out.reversal_voucher_no, "phải ghi dấu đã đảo");
+    }
+
+    /// Hai bản cùng trỏ về một hóa đơn gốc (112 rồi 113) → gốc chỉ được đảo MỘT lần.
+    #[tokio::test]
+    async fn import_thay_the_khong_dao_mot_goc_hai_lan() {
+        let pool = test_pool().await;
+        let goc = seed_invoice(&pool, "uuid-300", 1, LINE_GOC).await;
+        let goc_no = shdon_of(&pool, goc).await;
+        import_invoice(&pool, &load(&pool, goc).await, "", "HKD", "", "")
+            .await
+            .unwrap();
+
+        let rep1 = seed_invoice_full(&pool, "uuid-301", 2, LINE_GOC, ("C26ABC", &goc_no)).await;
+        let rep2 = seed_invoice_full(&pool, "uuid-302", 2, LINE_GOC, ("C26ABC", &goc_no)).await;
+        let a = import_invoice(&pool, &load(&pool, rep1).await, "", "HKD", "", "")
+            .await
+            .unwrap();
+        let b = import_invoice(&pool, &load(&pool, rep2).await, "", "HKD", "", "")
+            .await
+            .unwrap();
+
+        assert!(!a.reversal_voucher_no.is_empty(), "bản đầu đảo gốc");
+        assert_eq!(b.reversal_voucher_no, "", "bản sau không đảo lại nữa");
+        assert_eq!(
+            count(
+                &pool,
+                "SELECT COUNT(*) FROM inbound_voucher WHERE inbound_type = 'adjust'"
+            )
+            .await,
+            1
+        );
+    }
+
+    /// tthai=3 (điều chỉnh) KHÔNG phủ định cả gốc — gốc vẫn còn hiệu lực, đảo cả
+    /// gốc sẽ làm âm tồn kho.
+    #[tokio::test]
+    async fn import_dieu_chinh_khong_dao_phieu_goc() {
+        let pool = test_pool().await;
+        let goc = seed_invoice(&pool, "uuid-400", 1, LINE_GOC).await;
+        let goc_no = shdon_of(&pool, goc).await;
+        import_invoice(&pool, &load(&pool, goc).await, "", "HKD", "", "")
+            .await
+            .unwrap();
+
+        let adj = seed_invoice_full(&pool, "uuid-401", 3, LINE_GOC, ("C26ABC", &goc_no)).await;
+        let out = import_invoice(&pool, &load(&pool, adj).await, "", "HKD", "", "")
+            .await
+            .expect("nhập hóa đơn điều chỉnh");
+        assert_eq!(
+            out.reversal_voucher_no, "",
+            "bản điều chỉnh không đảo cả gốc"
+        );
+        assert_eq!(
+            count(
+                &pool,
+                "SELECT COUNT(*) FROM inbound_voucher WHERE inbound_type = 'adjust'"
+            )
+            .await,
+            0
+        );
+    }
+
+    /// Hàng gốc đã bán hết → không đủ tồn để trừ FIFO. Cả phiếu giảm lẫn phiếu
+    /// nhập phải KHÔNG được ghi, dòng cache còn nguyên để xử lý lại.
+    #[tokio::test]
+    async fn import_thay_the_rollback_khi_het_ton_de_dao() {
+        let pool = test_pool().await;
+        let goc = seed_invoice(&pool, "uuid-500", 1, LINE_GOC).await;
+        let goc_no = shdon_of(&pool, goc).await;
+        import_invoice(&pool, &load(&pool, goc).await, "", "HKD", "", "")
+            .await
+            .unwrap();
+        let rep = seed_invoice_full(&pool, "uuid-501", 2, LINE_GOC, ("C26ABC", &goc_no)).await;
+
+        sqlx::query!("UPDATE stock_lot SET quantity = 0, depleted = 1")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let err = import_invoice(&pool, &load(&pool, rep).await, "", "HKD", "", "")
+            .await
+            .expect_err("thiếu tồn phải chặn");
+        assert!(
+            err.contains("Không đủ tồn kho"),
+            "cần thông báo thiếu tồn, gặp lỗi khác: {err}"
+        );
+        assert_eq!(
+            count(&pool, "SELECT COUNT(*) FROM inbound_voucher").await,
+            1,
+            "chỉ còn phiếu gốc, không có phiếu dở"
+        );
+        assert_eq!(
+            count(
+                &pool,
+                "SELECT COUNT(*) FROM hddt_purchase_invoice WHERE portal_id = 'uuid-501'"
+            )
+            .await,
+            1,
+            "dòng cache phải còn để bấm lại"
+        );
+        let marked: String = sqlx::query_scalar!(
+            "SELECT reversed_voucher_no FROM hddt_imported_invoice WHERE shdon = ?",
+            goc_no
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(marked, "", "rollback thì không được ghi dấu đã đảo");
     }
 }

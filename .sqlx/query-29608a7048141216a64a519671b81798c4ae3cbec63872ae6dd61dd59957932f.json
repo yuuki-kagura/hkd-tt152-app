@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT iv.voucher_no, hi.reversed_voucher_no\n           FROM hddt_imported_invoice hi\n           JOIN inbound_voucher iv ON iv.id = hi.inbound_voucher_id\n          WHERE hi.khhdon = ? AND hi.shdon = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "voucher_no",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "reversed_voucher_no",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "29608a7048141216a64a519671b81798c4ae3cbec63872ae6dd61dd59957932f"
+}

@@ -1316,8 +1316,9 @@ export interface HddtSyncRow {
   khmshdon: number;
   /** regular = hóa đơn điện tử, cash-register = máy tính tiền. */
   portal_kind: string;
-  /** pending = chờ nhập kho · imported = đã có phiếu · manual = cần xử lý. */
-  status: "pending" | "imported" | "manual";
+  /** pending = chờ nhập kho · imported = đã có phiếu · manual = cần xử lý ·
+   * superseded = bản đã bị thay thế/điều chỉnh/hủy, không nhập kho. */
+  status: "pending" | "imported" | "manual" | "superseded";
   skip_reason: string;
   line_count: number;
   new_product_count: number;
@@ -1328,6 +1329,12 @@ export interface HddtSyncRow {
   tgtttbso: number;
   voucher_no: string;
   detail_error: string;
+  /** Trạng thái hóa đơn cổng: 1 mới · 2 thay thế · 3 điều chỉnh · 4/5/6 đã bị thay thế/điều chỉnh/hủy. */
+  tthai: number;
+  /** "C26MYY 111" — hóa đơn gốc mà bản này thay thế/điều chỉnh; rỗng nếu không có. */
+  goc_hd: string;
+  /** Phiếu nhập đã tồn tại của hóa đơn gốc — nhập bản này sẽ kéo theo phiếu giảm. */
+  goc_voucher_no: string;
 }
 
 export interface HddtSyncPreview {
@@ -1337,6 +1344,7 @@ export interface HddtSyncPreview {
     pending: number;
     imported: number;
     manual: number;
+    superseded: number;
     new_products: number;
     total_value: number;
     days_cached: number;
@@ -1349,6 +1357,8 @@ export interface HddtSyncImportResult {
   ok: boolean;
   message: string;
   voucher_no: string;
+  /** Phiếu điều chỉnh giảm đã tạo để đảo phiếu của hóa đơn gốc; rỗng nếu không có. */
+  reversal_voucher_no: string;
   products_created: number;
 }
 

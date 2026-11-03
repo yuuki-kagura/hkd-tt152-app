@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE stock_lot SET quantity = 0, depleted = 1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "62ff2897d3bd63804be8193e513220c8cbdbf4b185d1e9d843c24d5845be28ac"
+}
