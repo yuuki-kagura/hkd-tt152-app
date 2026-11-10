@@ -1,5 +1,18 @@
 # Changelog
 
+# [2.0.0](https://github.com/yuuki-kagura/hkd-tt152-app/compare/v1.0.0...v2.0.0) (2026-11-10)
+
+
+### Features
+
+* **updater:** thêm endpoint dự phòng yuuki-kagura cho OTA ([a8aca62](https://github.com/yuuki-kagura/hkd-tt152-app/commit/a8aca62b906fc9860ae6045c6ce8c6ed1b88f136))
+
+
+### BREAKING CHANGES
+
+* **updater:** chuyển kênh phát hành OTA sang yuuki-kagura; bản cũ chỉ
+trỏ tachibana-shin nên không tự nhận được bản mới nếu repo đó hỏng.
+
 # 1.0.0 (2026-11-10)
 
 
