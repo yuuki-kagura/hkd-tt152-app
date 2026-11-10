@@ -1,5 +1,16 @@
 # Changelog
 
+# [3.0.0](https://github.com/yuuki-kagura/hkd-tt152-app/compare/v2.0.0...v3.0.0) (2026-11-10)
+
+
+* feat!: ép phát hành 3.0.0 ([18d2f11](https://github.com/yuuki-kagura/hkd-tt152-app/commit/18d2f11a284f142d49dfa0e5ee5edb4ce47efcee))
+
+
+### BREAKING CHANGES
+
+* bản 2.0.0 đã phát hành; ép semantic-release nhảy major
+lên 3.0.0 theo yêu cầu.
+
 # [2.0.0](https://github.com/yuuki-kagura/hkd-tt152-app/compare/v1.0.0...v2.0.0) (2026-11-10)
 
 
