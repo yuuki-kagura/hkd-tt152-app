@@ -325,6 +325,25 @@ jobs:
             echo "::notice::origin/main chưa có CHANGELOG.md — dùng bản trong checkout."
           fi
 
+      # Chốt chặn cuối: không bao giờ công khai một release rỗng. Nếu job đóng
+      # gói bị bỏ qua (thiếu TAURI_SIGNING_PRIVATE_KEY) thì release vẫn "success"
+      # nhưng không có file nào — công khai lúc đó là người dùng/updater thấy bản
+      # 3.0.0 trống. Đếm asset cài đặt thật (bỏ qua .sig, latest.json) rồi mới mở.
+      - name: Kiểm tra có file cài đặt
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          count=$(gh release view "v$VERSION" --json assets \
+            --jq '[.assets[].name] | map(select(test("\\.(exe|msi|dmg|AppImage|deb|tar\\.gz)$"))) | length')
+          if [ "$count" -eq 0 ]; then
+            echo "::error::Release v$VERSION không có file cài đặt nào — giữ ở dạng nháp. Kiểm tra secret TAURI_SIGNING_PRIVATE_KEY rồi chạy lại workflow."
+            exit 1
+          fi
+          echo "Release v$VERSION có $count file cài đặt."
+
       - name: Viết nội dung & công khai
         shell: bash
         env:
