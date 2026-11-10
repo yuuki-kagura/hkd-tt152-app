@@ -110,11 +110,11 @@ jobs:
           - label: macOS Intel (dmg)
             os: macos-15-intel
             target: x86_64-apple-darwin
-            args: --bundles dmg
+            args: --bundles dmg,app
           - label: macOS Apple Silicon (dmg)
             os: macos-15
             target: aarch64-apple-darwin
-            args: --bundles dmg
+            args: --bundles dmg,app
           - label: Linux x64 (AppImage + deb)
             os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
