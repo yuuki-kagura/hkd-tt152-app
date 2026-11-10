@@ -41,7 +41,8 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDU1Q0JCRkMzQjk3REU0MEMKUldRTTVIMjV3Ny9MVmV5MWNaZjhFK2dxV3pJUnFNOGZWNzNzWVRjSzkyOGxNZHZwcUNUTWpYbzEK",
       "endpoints": [
-        "https://github.com/tachibana-shin/hkd-tt152-app/releases/latest/download/latest.json"
+        "https://github.com/tachibana-shin/hkd-tt152-app/releases/latest/download/latest.json",
+        "https://github.com/yuuki-kagura/hkd-tt152-app/releases/latest/download/latest.json"
       ]
     }
   }
