@@ -112,7 +112,7 @@ jobs:
             target: x86_64-apple-darwin
             args: --bundles dmg
           - label: macOS Apple Silicon (dmg)
-            os: macos-14
+            os: macos-15
             target: aarch64-apple-darwin
             args: --bundles dmg
           - label: Linux x64 (AppImage + deb)
