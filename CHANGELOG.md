@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.0.1](https://github.com/yuuki-kagura/hkd-tt152-app/compare/v3.0.0...v3.0.1) (2026-11-11)
+
+
+### Bug Fixes
+
+* **accounting:** xếp báo cáo nhanh hóa đơn theo số hóa đơn ([1a2fd78](https://github.com/yuuki-kagura/hkd-tt152-app/commit/1a2fd789417d665dd5025915448a1cf3fe9ce04e))
+
 # [3.0.0](https://github.com/yuuki-kagura/hkd-tt152-app/compare/v2.0.0...v3.0.0) (2026-11-10)
 
 
