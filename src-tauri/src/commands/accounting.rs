@@ -288,10 +288,25 @@ pub(crate) struct QuickSaleRow {
     pub(crate) industry_revenue: Vec<QuickSaleIndustryRevenue>,
 }
 
+/// Khóa so sánh “tự nhiên” của số hóa đơn: số thuần (kể cả có đệm 0, ví dụ
+/// `00000010`) so theo **giá trị số** nên 9 đứng trước 10 dù độ dài khác nhau;
+/// số dạng chữ (ví dụ `E2026/001`) xếp sau và so theo ABC.
+fn invoice_no_sort_key(no: &str) -> (u8, u128, String) {
+    let trimmed = no.trim();
+    match trimmed.parse::<u128>() {
+        Ok(value) => (0, value, String::new()),
+        Err(_) => (1, 0, trimmed.to_uppercase()),
+    }
+}
+
 /// Báo cáo nhanh hóa đơn đã phát hành trong khoảng ngày đang xem (quý tờ khai):
 /// 1 dòng = 1 hóa đơn — số HĐĐT, loại (hàng hóa/dịch vụ), tổng tiền và doanh
 /// thu theo từng nhóm ngành. Chỉ lấy hóa đơn có số HĐĐT thật; nháp, hóa đơn
 /// chưa phát hành, đã bị thay thế hay đã hủy không vào báo cáo.
+///
+/// Danh sách xếp **theo số hóa đơn tăng dần** (không theo ngày lập): hóa đơn
+/// có thể phát hành lệch ngày so với số được cấp nên xếp theo ngày sẽ ra thứ tự
+/// 83, 84, 85, 82… — người dùng đọc báo cáo cần đúng thứ tự số hóa đơn.
 pub(crate) async fn quick_sales_report_core(
     pool: &SqlitePool,
     from_date: &str,
@@ -365,7 +380,7 @@ pub(crate) async fn quick_sales_report_core(
             });
     }
 
-    Ok(rows
+    let mut out: Vec<QuickSaleRow> = rows
         .into_iter()
         .map(
             |(invoice_id, number, date, customer, total, has_goods, has_service)| {
@@ -385,7 +400,16 @@ pub(crate) async fn quick_sales_report_core(
                 }
             },
         )
-        .collect())
+        .collect();
+    // Số hóa đơn là khóa sắp xếp chính; trùng số (hiếm) thì giữ thứ tự ngày,
+    // tên như truy vấn để kết quả ổn định giữa các lần tải.
+    out.sort_by(|a, b| {
+        invoice_no_sort_key(&a.number)
+            .cmp(&invoice_no_sort_key(&b.number))
+            .then_with(|| a.date.cmp(&b.date))
+            .then_with(|| a.label.cmp(&b.label))
+    });
+    Ok(out)
 }
 
 /// Lệnh giao diện: báo cáo nhanh hóa đơn đã xuất theo khoảng ngày đang xem.
@@ -3949,6 +3973,77 @@ mod tests {
         );
         let sum: f64 = rows.iter().map(|r| r.total).sum();
         assert_eq!(sum, 180_000.0, "cộng đúng tổng 3 hóa đơn trong kỳ");
+    }
+
+    /// Báo cáo nhanh phải xếp theo **số hóa đơn**, không theo ngày lập: hóa đơn
+    /// được cấp số lệch ngày nên trước đây ra 83, 84, 85, 82… (issue #1).
+    /// So theo giá trị số để 9 đứng trước 10 (số không đệm 0), còn số dạng chữ
+    /// xếp sau cùng và theo ABC.
+    #[tokio::test]
+    async fn bao_cao_nhanh_xep_theo_so_hoa_don() {
+        let pool = test_pool().await;
+        let goods = seed_product(&pool, "QR-ORD", "Hàng thứ tự", 0.01).await;
+        // (số HĐĐT, ngày) cố tình lệch: số nhỏ hơn lại có ngày lớn hơn.
+        for (e_no, date) in [
+            ("00000083", "2026-05-01"),
+            ("00000084", "2026-05-02"),
+            ("00000085", "2026-05-03"),
+            ("00000082", "2026-05-04"),
+            ("10", "2026-05-05"),
+            ("9", "2026-05-06"),
+            ("E2026/001", "2026-05-07"),
+        ] {
+            let number = format!("ORD-{e_no}");
+            sqlx::query!(
+                "INSERT INTO invoice
+                    (number, e_invoice_no, date, customer, customer_tax_code, total, status)
+                 VALUES (?, ?, ?, 'Khách báo cáo', '', ?, ?)",
+                number,
+                e_no,
+                date,
+                1000.0,
+                "official"
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+            let id: i64 = sqlx::query_scalar!(
+                r#"SELECT id as "id!" FROM invoice WHERE number = ?"#,
+                number
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            sqlx::query!(
+                "INSERT INTO invoice_item (invoice_id, product_id, quantity, unit_price, subtotal)
+                     VALUES (?, ?, ?, 1000.0, ?)",
+                id,
+                goods,
+                1.0,
+                1000.0
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let rows = quick_sales_report_core(&pool, "2026-05-01", "2026-05-31")
+            .await
+            .expect("báo cáo nhanh");
+        let numbers: Vec<&str> = rows.iter().map(|r| r.number.as_str()).collect();
+        assert_eq!(
+            numbers,
+            vec![
+                "9",
+                "10",
+                "00000082",
+                "00000083",
+                "00000084",
+                "00000085",
+                "E2026/001"
+            ],
+            "xếp theo số hóa đơn tăng dần, số dạng chữ xếp sau"
+        );
     }
 
     /// PC trả nhà cung cấp là **thanh toán phải trả** (Nợ 331), không phải chi phí:
