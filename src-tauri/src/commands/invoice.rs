@@ -270,6 +270,10 @@ const PREVIEW_QR_URL: &str = "https://github.com/tachibana-shin";
 ///   ký hiệu tạm ghi `000000` để không ai tưởng đây là hóa đơn thật;
 /// * đã phát hành: giữ nguyên khung in, ưu tiên số/ký hiệu/ngày HĐĐT đã ghi
 ///   (ký hiệu lấy từ hồ sơ hộ khi chưa ghi), chỉ thêm QR.
+///
+/// Bản xem trước luôn tắt cột "Thuế suất" của bảng hàng hóa (`an_tsuat`): hộ
+/// kinh doanh không in cột này trên khung xem trước, bảng chỉ còn hàng hóa và
+/// thành tiền.
 pub(crate) async fn invoice_preview_json(pool: &SqlitePool, id: i64) -> Result<String, String> {
     let mut data: serde_json::Value =
         serde_json::from_str(&invoice_draft_detail_json(pool, id).await?)
@@ -301,6 +305,7 @@ pub(crate) async fn invoice_preview_json(pool: &SqlitePool, id: i64) -> Result<S
         }
     }
     data["qrcode"] = json!(PREVIEW_QR_URL);
+    data["an_tsuat"] = json!(true);
     Ok(data.to_string())
 }
 
@@ -2176,9 +2181,12 @@ async fn next_invoice_no(pool: &SqlitePool) -> Result<String, String> {
 /// app tạo sẵn một hóa đơn nháp mới (sao chép khách + dòng hàng) để người dùng
 /// sửa sai sót rồi chép sang bên kia phát hành.
 ///
-/// **Không đụng tồn kho**: hàng hoá chỉ sai trên giấy tờ, thực tế vẫn nằm trong
-/// kho — phiếu xuất của hóa đơn thay thế sẽ trừ kho như bình thường. Hàng thật sự
-/// trả lại thì người dùng lập phiếu nhập kho riêng.
+/// **Đảo cả tồn kho**: hàng của hóa đơn bị thay thế được trả về đúng kho đã xuất
+/// (lô mới, giá vốn FIFO đã ghi, bút toán Nợ 152 / Có 632) để hóa đơn thay thế
+/// xuất lại được — đã bán hết tồn thì trước đây hóa đơn nháp thay thế không lập
+/// nổi phiếu xuất. Một lượt xuất thật của lô hàng đó chỉ còn được tính giá vốn
+/// một lần (xem [`crate::commands::accounting::load_fifo_cogs`]).
+/// Hàng thật sự trả lại cho người bán thì lập phiếu nhập kho riêng như cũ.
 pub(crate) async fn replace_invoice_core(
     pool: &SqlitePool,
     invoice_id: i64,
@@ -2219,7 +2227,7 @@ pub(crate) async fn replace_invoice_core(
     // hóa đơn thay thế kê lại là cân bằng.
     let lines = sqlx::query!(
         r#"SELECT ii.product_id, ii.quantity, ii.unit_price, ii.subtotal, ii.discount,
-                  ii.industry_code, ii.vat_rate, ii.pit_rate, ii.line_name
+                  ii.industry_code, ii.vat_rate, ii.pit_rate, ii.line_name, ii.warehouse_code
              FROM invoice_item ii WHERE ii.invoice_id = ? ORDER BY ii.id"#,
         invoice_id
     )
@@ -2242,6 +2250,7 @@ pub(crate) async fn replace_invoice_core(
         inv.e_invoice_no.trim()
     };
     let description = format!("Đảo doanh thu — thay thế hóa đơn {display_number}");
+    let stock_description = format!("Trả hàng về kho — thay thế hóa đơn {display_number}");
     // Mã khách trong danh mục: ưu tiên theo MST, không có thì theo tên — cùng
     // quy tắc với `create_outbound_from_invoice` để bút toán đảo gắn đúng.
     let mst = inv.customer_tax_code.trim().to_string();
@@ -2270,16 +2279,84 @@ pub(crate) async fn replace_invoice_core(
     let new_no = next_invoice_no(pool).await?;
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
     for l in &lines {
+        let product = sqlx::query!(
+            "SELECT code, unit, is_service FROM product WHERE id = ?",
+            l.product_id
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+        let code = product.code.clone();
+        // Đảo **tồn kho** của hóa đơn bị thay thế: hàng đã xuất theo hóa đơn cũ
+        // được trả lại kho (lô mới, đúng giá vốn FIFO đã ghi) để hóa đơn thay
+        // thế xuất lại được — không trả thì đã bán hết tồn là hóa đơn thay thế
+        // không lập nổi phiếu xuất (thiếu tồn). Đảo giá vốn bằng cặp Nợ 152 /
+        // Có 632, đúng cặp mà phiếu xuất gốc đã ghi.
+        if product.is_service == 0 && l.quantity > 0.0 {
+            let cogs = sqlx::query!(
+                r#"SELECT COALESCE(SUM(amount), 0.0) as "amount!: f64",
+                          COALESCE(SUM(quantity), 0.0) as "quantity!: f64"
+                     FROM journal_entry
+                    WHERE voucher_no = ? AND entry_type = 'CP' AND debit_account = '632'
+                      AND product_code = ?"#,
+                inv.voucher_no,
+                code
+            )
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
+            // Không có bút toán giá vốn (dữ liệu cũ) thì tạm lấy đơn giá bán làm
+            // giá vốn — tồn kho đúng số lượng mới là điều kiện để xuất lại.
+            let unit_cost = if cogs.quantity > 0.0 {
+                cogs.amount / cogs.quantity
+            } else {
+                l.unit_price
+            };
+            let wh_id = resolve_warehouse(&mut tx, &l.warehouse_code, &code).await?;
+            let lot_cost = round2(unit_cost);
+            sqlx::query!(
+                "INSERT INTO stock_lot (product_id, warehouse_id, quantity, unit_cost, received_at, depleted)
+                 VALUES (?, ?, ?, ?, ?, 0)",
+                l.product_id,
+                wh_id,
+                l.quantity,
+                lot_cost,
+                inv.date
+            )
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
+            insert_journal_entry(
+                &mut tx,
+                &inv.date,
+                &voucher_no,
+                "PN",
+                &stock_description,
+                &code,
+                "",
+                &customer_code,
+                l.quantity,
+                lot_cost,
+                round2(l.quantity * unit_cost),
+                "152",
+                "632",
+                "",
+                0.0,
+                0.0,
+                &product.unit,
+                "",
+                reason,
+                0.0,
+            )
+            .await?;
+        }
+
         // `invoice_item.subtotal` đã là giá trị dòng sau chiết khấu (đúng bằng
         // số tiền bút toán Nợ 511 / Có 131 của phiếu xuất gốc).
         let amount = round2(l.subtotal);
         if amount <= 0.0 {
             continue;
         }
-        let code = sqlx::query_scalar!("SELECT code FROM product WHERE id = ?", l.product_id)
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(|e| e.to_string())?;
         insert_journal_entry(
             &mut tx,
             &inv.date,
@@ -2324,8 +2401,9 @@ pub(crate) async fn replace_invoice_core(
     for l in &lines {
         sqlx::query!(
             r#"INSERT INTO invoice_item (invoice_id, product_id, quantity, unit_price, subtotal,
-                                        industry_code, vat_rate, pit_rate, discount, line_name)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
+                                        industry_code, vat_rate, pit_rate, discount, line_name,
+                                        warehouse_code)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
             new_id,
             l.product_id,
             l.quantity,
@@ -2335,7 +2413,8 @@ pub(crate) async fn replace_invoice_core(
             l.vat_rate,
             l.pit_rate,
             l.discount,
-            l.line_name
+            l.line_name,
+            l.warehouse_code
         )
         .execute(&mut *tx)
         .await
@@ -3354,6 +3433,8 @@ mod tests {
         assert_eq!(draft["khmshdon"], "000000", "mẫu số tạm của bản nháp");
         assert_eq!(draft["khhdon"], "000000", "ký hiệu tạm của bản nháp");
         assert_eq!(draft["qrcode"], "https://github.com/tachibana-shin");
+        // Bản xem trước không in cột "Thuế suất" của bảng hàng hóa (issue #2).
+        assert_eq!(draft["an_tsuat"], true, "tắt cột Thuế suất ở bản xem trước");
 
         // ── 2) Đã chép sang cổng → vẫn chưa phát hành nên vẫn là bản nháp;
         //       phát hành xong thì giữ nguyên khung in, chỉ còn thiếu QR ──
@@ -5104,15 +5185,28 @@ mod tests {
         .unwrap();
         assert_eq!(net, 0.0);
 
-        // Tồn kho KHÔNG đụng: hàng vẫn trong kho cho hóa đơn thay thế xuất sau.
+        // Đảo tồn kho: hàng của hóa đơn bị thay thế trả về kho nên tồn quay lại
+        // đủ 10 — hóa đơn thay thế mới lập được phiếu xuất (trước đây còn 7 và
+        // bán hết tồn là không xuất lại được).
         let qty: f64 = sqlx::query_scalar!(
-            "SELECT quantity FROM stock_lot WHERE product_id = ? AND depleted = 0",
+            r#"SELECT COALESCE(SUM(quantity), 0.0) as "q!: f64" FROM stock_lot
+                WHERE product_id = ? AND depleted = 0"#,
             p
         )
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!(qty, 7.0);
+        assert_eq!(qty, 10.0);
+        // Bút toán đảo giá vốn: Nợ 152 / Có 632 đúng giá vốn FIFO đã ghi (3 × 1.000).
+        let cogs_back: f64 = sqlx::query_scalar!(
+            r#"SELECT COALESCE(SUM(amount), 0.0) as "q!: f64" FROM journal_entry
+                WHERE voucher_no = 'PX001DJ' AND entry_type = 'PN'
+                  AND debit_account = '152' AND credit_account = '632'"#
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(cogs_back, 3_000.0);
 
         // Hóa đơn cũ: đã bị thay thế, trỏ sang hóa đơn mới, ghi phiếu đảo doanh thu.
         let old = sqlx::query!(
@@ -5151,6 +5245,69 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(repl_id, Some(id));
+    }
+
+    /// Đúng tình huống người dùng báo (issue #3): tồn 10, hóa đơn 1 xuất hết 10
+    /// nên tồn = 0 — thay thế hóa đơn 1 thì hàng phải quay lại kho, nếu không
+    /// hóa đơn nháp thay thế không lập được phiếu xuất vì "thiếu tồn". Sau khi
+    /// xuất lại thì tồn về 0 và giá vốn của kỳ chỉ tính **một lần**.
+    #[tokio::test]
+    async fn thay_the_hoa_don_da_xuat_het_ton_thi_hang_ve_kho_xuat_lai_duoc() {
+        let pool = test_pool().await;
+        let p = seed_product(&pool, "HD-TH4", "Bóng đèn", 0.01).await;
+        let w = seed_warehouse(&pool, "W-TH4", "Kho TH4").await;
+        add_stock_lot(&pool, p, w, 10.0, 1000.0, "2026-01-01").await;
+        save_invoice_core(
+            &pool,
+            "HD0021",
+            "2026-03-10",
+            "Khách hết tồn",
+            "MST-HE",
+            &[line("HD-TH4", 10.0, 1000.0, 0.0, "W-TH4")],
+        )
+        .await
+        .unwrap();
+        let id: i64 =
+            sqlx::query_scalar!(r#"SELECT id as "id!" FROM invoice WHERE number = 'HD0021'"#)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        create_outbound_from_invoice(&pool, id).await.unwrap();
+        link_hddt_core(&pool, id, "00000999", "1C26TT152", "2026-03-10")
+            .await
+            .unwrap();
+        let stock = |pool: SqlitePool| async move {
+            sqlx::query_scalar!(
+                r#"SELECT COALESCE(SUM(quantity), 0.0) as "q!: f64" FROM stock_lot
+                    WHERE product_id = ? AND depleted = 0"#,
+                p
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        };
+        assert_eq!(stock(pool.clone()).await, 0.0, "đã xuất hết tồn");
+
+        let res = replace_invoice_core(&pool, id, "Sai đơn giá", "admin")
+            .await
+            .unwrap();
+        let new_id = res["replacement_invoice_id"].as_i64().unwrap();
+        assert_eq!(
+            stock(pool.clone()).await,
+            10.0,
+            "hàng trả về kho khi thay thế"
+        );
+
+        // Hóa đơn nháp thay thế lập phiếu xuất được nhờ tồn đã quay lại.
+        create_outbound_from_invoice(&pool, new_id).await.unwrap();
+        assert_eq!(stock(pool.clone()).await, 0.0, "xuất lại đúng 10 cái");
+
+        // Giá vốn kỳ không bị nhân đôi: lượt xuất của hóa đơn đã bị thay thế
+        // không còn được tính, chỉ còn lượt xuất của hóa đơn thay thế.
+        let cogs = crate::commands::accounting::load_fifo_cogs(&pool, "2026-03-01", "2026-03-31")
+            .await
+            .unwrap();
+        assert_eq!(cogs, 10_000.0, "giá vốn 10 × 1.000, không phải 20 × 1.000");
     }
 
     #[tokio::test]

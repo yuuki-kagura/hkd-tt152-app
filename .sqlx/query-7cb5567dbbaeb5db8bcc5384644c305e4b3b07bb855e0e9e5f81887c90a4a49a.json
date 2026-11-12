@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT ii.product_id, ii.quantity, ii.unit_price, ii.subtotal, ii.discount,\n                  ii.industry_code, ii.vat_rate, ii.pit_rate, ii.line_name\n             FROM invoice_item ii WHERE ii.invoice_id = ? ORDER BY ii.id",
+  "query": "SELECT ii.product_id, ii.quantity, ii.unit_price, ii.subtotal, ii.discount,\n                  ii.industry_code, ii.vat_rate, ii.pit_rate, ii.line_name, ii.warehouse_code\n             FROM invoice_item ii WHERE ii.invoice_id = ? ORDER BY ii.id",
   "describe": {
     "columns": [
       {
@@ -47,6 +47,11 @@
         "name": "line_name",
         "ordinal": 8,
         "type_info": "Text"
+      },
+      {
+        "name": "warehouse_code",
+        "ordinal": 9,
+        "type_info": "Text"
       }
     ],
     "parameters": {
@@ -61,8 +66,9 @@
       false,
       false,
       false,
+      false,
       false
     ]
   },
-  "hash": "597fa173b8dd4a2cca5586e31d90f5cc902caca5855b2aa5098b30496db163ed"
+  "hash": "7cb5567dbbaeb5db8bcc5384644c305e4b3b07bb855e0e9e5f81887c90a4a49a"
 }

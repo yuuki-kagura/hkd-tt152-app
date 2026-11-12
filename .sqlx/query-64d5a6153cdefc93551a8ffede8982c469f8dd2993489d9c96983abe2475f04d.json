@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COALESCE(SUM(amount), 0.0) as \"q!: f64\" FROM journal_entry\n                WHERE voucher_no = 'PX001DJ' AND entry_type = 'PN'\n                  AND debit_account = '152' AND credit_account = '632'",
+  "describe": {
+    "columns": [
+      {
+        "name": "q!: f64",
+        "ordinal": 0,
+        "type_info": "Float"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "64d5a6153cdefc93551a8ffede8982c469f8dd2993489d9c96983abe2475f04d"
+}

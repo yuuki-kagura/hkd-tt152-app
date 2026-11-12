@@ -51,6 +51,17 @@ pub(crate) fn js_number(v: &Value) -> Option<f64> {
     }
 }
 
+/// Đọc cờ kiểu JavaScript: `true`, `1`, `"true"`, `"1"` là bật; thiếu trường,
+/// `null`, `0`, `""` là tắt. Dùng cho các cờ in ấn nằm ngoài chuẩn cổng HĐĐT.
+pub(crate) fn js_flag(v: &Value) -> bool {
+    match v {
+        Value::Bool(b) => *b,
+        Value::Number(n) => n.as_f64().is_some_and(|x| x != 0.0),
+        Value::String(s) => matches!(s.trim().to_ascii_lowercase().as_str(), "true" | "1"),
+        _ => false,
+    }
+}
+
 /// In số theo cách JS in `String(2.0)` → `"2"` (không có `.0` như Debug của Rust).
 fn js_number_str(v: Option<f64>) -> String {
     match v {

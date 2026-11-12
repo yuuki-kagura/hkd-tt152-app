@@ -128,4 +128,9 @@ pub struct InvoiceData {
     pub hdhhdvu: Vec<GoodsRow>,
     #[serde(deserialize_with = "vec_or_empty")]
     pub thttltsuat: Vec<TaxRow>,
+
+    // ── Cờ in ấn (ngoài chuẩn cổng HĐĐT) ──
+    /// Ẩn hẳn cột "Thuế suất" của bảng hàng hóa — bản xem trước hóa đơn của
+    /// hộ kinh doanh không in cột này dù các dòng có nhiều tỉ lệ khác nhau.
+    pub an_tsuat: Value,
 }

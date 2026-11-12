@@ -1205,7 +1205,10 @@ pub(crate) async fn load_cum_revenue_before(
 /// Hàng dịch vụ không theo dõi tồn nên không có giá vốn (khớp lúc lập phiếu xuất).
 /// Phiếu điều chỉnh giảm (khách trả lại) loại khỏi lượt xuất: app đã nhập lại hàng
 /// (bút Nợ 152 / Có 632) chứ không tiêu kho, coi là lượt xuất thì lô FIFO hụt đi
-/// so với sổ kho và giá vốn của các lần bán sau bị đẩy lên.
+/// so với sổ kho và giá vốn của các lần bán sau bị đẩy lên. Cùng lý do đó, lượt
+/// xuất của **hóa đơn đã bị thay thế/hủy** không được tính: hàng của nó đã được
+/// trả lại kho khi lập hóa đơn thay thế, tính thêm lượt xuất gốc là giá vốn bị
+/// nhân đôi.
 pub(crate) async fn load_fifo_cogs(pool: &SqlitePool, from: &str, to: &str) -> Result<f64, String> {
     let receipts: Vec<Receipt> = sqlx::query!(
         r#"SELECT je.product_code AS "product_code!", je.quantity, je.unit_price
@@ -1233,6 +1236,10 @@ pub(crate) async fn load_fifo_cogs(pool: &SqlitePool, from: &str, to: &str) -> R
               AND je.quantity > 0
               AND COALESCE(je.adjust_code, '') NOT IN ('GiamDT', 'XuatNVL')
               AND COALESCE(p.is_service, 0) = 0
+              AND NOT EXISTS (
+                    SELECT 1 FROM invoice inv
+                     WHERE inv.voucher_no = je.voucher_no
+                       AND inv.status IN ('replaced', 'cancelled'))
             ORDER BY je.posting_date, je.id"#,
         from,
         to

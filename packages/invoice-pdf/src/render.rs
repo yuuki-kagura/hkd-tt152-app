@@ -6,8 +6,8 @@
 
 use crate::data::{GoodsRow, InvoiceData, TtKhac};
 use crate::format::{
-    escape, extract_cn, format_vietnamese_date, format_vnd, js_number, js_string, parse_signature,
-    Signature,
+    escape, extract_cn, format_vietnamese_date, format_vnd, js_flag, js_number, js_string,
+    parse_signature, Signature,
 };
 use crate::kind::Kind;
 use crate::qr::{qr_data_uri, QR_PX};
@@ -118,8 +118,9 @@ fn render(data: &InvoiceData) -> String {
         .iter()
         .any(|row| js_number(&row.stckhau).is_some_and(|v| v > 0.0));
     // Cột "Thuế suất" chỉ cần khi hàng hóa xài nhiều tỉ lệ khác nhau; còn 1
-    // tỉ lệ duy nhất thì con số đó nói được ngay ở dòng tổng cộng.
-    let has_rate = has_multiple_rates(&data.hdhhdvu);
+    // tỉ lệ duy nhất thì con số đó nói được ngay ở dòng tổng cộng. Bản xem trước
+    // hóa đơn có thể tắt hẳn cột này bằng cờ `an_tsuat`.
+    let has_rate = !js_flag(&data.an_tsuat) && has_multiple_rates(&data.hdhhdvu);
     // Cột "Chiết khấu" chỉ thêm khi có ít nhất 1 mặt hàng thực sự được chiết
     // khấu — không thì bảng gọn lại như cũ. Tiêu đề đứng sau "Thành tiền" cho
     // đúng thứ tự xuất dữ liệu của `goods_rows` (thành tiền trước chiết khấu).
@@ -938,6 +939,15 @@ mod tests {
         assert!(
             row.split("</tr>").next().unwrap().contains(">5%"),
             "dòng thứ 2 mang tỉ lệ 5%: {row}"
+        );
+
+        // Cờ in ấn `an_tsuat`: bản xem trước hóa đơn hộ kinh doanh tắt hẳn cột
+        // Thuế suất dù các dòng đang xài 2 tỉ lệ khác nhau.
+        data["an_tsuat"] = serde_json::json!(true);
+        let hidden = build_invoice_html(&data.to_string()).expect("dựng HTML được");
+        assert!(
+            !goods_thead(&hidden).contains(">Thuế suất<"),
+            "cờ an_tsuat → không in cột Thuế suất"
         );
     }
 
