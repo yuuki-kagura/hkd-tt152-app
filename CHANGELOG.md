@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.0.2](https://github.com/yuuki-kagura/hkd-tt152-app/compare/v3.0.1...v3.0.2) (2026-11-12)
+
+
+### Bug Fixes
+
+* **invoice:** ẩn cột Thuế suất ở bản xem trước PDF + trả hàng về kho khi thay thế hóa đơn ([8f36218](https://github.com/yuuki-kagura/hkd-tt152-app/commit/8f362187e0324f4504a61554924b6f864b406bfb))
+
 ## [3.0.1](https://github.com/yuuki-kagura/hkd-tt152-app/compare/v3.0.0...v3.0.1) (2026-11-11)
 
 
